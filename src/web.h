@@ -1,13 +1,14 @@
 #pragma once
 // Wi-Fi access point + captive portal + mDNS + HTTP server for the browser UI.
-// The browser talks the same line protocol as the UART (see README.md section 6):
+// The browser talks the same line protocol as the UART (see README.md):
 //   POST /api/cmd     c=<command line>   -> "@OK <CMD> ..." / "@ERR <CMD> ..."
 //   GET  /api/events  ?since=<seq>       -> "<seq> <busy>\n" then the "@EVT ..." lines after <seq>
-//   POST /api/upload  ?size&crc&base&target&name, multipart file -> the END reply
+//   POST /api/upload  ?size&crc&fields&name, multipart file -> the END reply
+//                     (fields = the family part of BEGIN: "<base> <target>" or "<option bytes>")
 #include <Arduino.h>
 
 #ifndef WIFI_AP_SSID
-#define WIFI_AP_SSID "MM32-Flasher"  // the last 4 hex digits of the MAC are appended
+#define WIFI_AP_SSID "MCU-Flasher"  // the last 4 hex digits of the MAC are appended
 #endif
 #ifndef WIFI_AP_PASS
 #define WIFI_AP_PASS ""  // empty = open network; otherwise 8..63 characters
@@ -16,7 +17,7 @@
 #define WIFI_AP_CHANNEL 6
 #endif
 #ifndef MDNS_HOSTNAME
-#define MDNS_HOSTNAME "mm32-flasher"  // http://mm32-flasher.local
+#define MDNS_HOSTNAME "mcu-flasher"  // http://mcu-flasher.local
 #endif
 
 namespace web {

@@ -1,5 +1,5 @@
 @echo off
-rem Launch the MM32 programmer UI with a Python that has tkinter.
+rem Launch the programmer UI with a Python that has tkinter.
 rem (The PlatformIO terminal puts PlatformIO's own Python first on PATH, which has no tkinter.)
 setlocal
 cd /d "%~dp0"
@@ -16,5 +16,5 @@ if not defined PY (
 )
 
 %PY% -c "import serial" >nul 2>&1 || %PY% -m pip install --quiet --disable-pip-version-check --no-warn-script-location pyserial
-%PY% mm32_flasher_ui.py
+%PY% flasher_ui.py
 if errorlevel 1 pause

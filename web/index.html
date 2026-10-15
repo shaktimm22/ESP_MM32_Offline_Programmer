@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MM32 Offline Programmer</title>
+<title>Offline Programmer</title>
 <style>
-/* Same palette as tools/mm32_flasher_ui.py (dark slate). No external assets: the AP has no internet. */
+/* Same palette as the desktop UIs in tools/ (dark slate). No external assets: the AP has no internet. */
 :root {
   --bg: #0e131b; --card: #161d28; --border: #273244; --text: #e6eaf0; --muted: #8c99ad;
   --accent: #3b82f6; --accent-hover: #2563eb; --accent-glow: #60a5fa; --accent-soft: #172a46; --accent-text: #93c5fd;
@@ -37,6 +37,14 @@ header .sub { color: var(--header-muted); font-size: 12px; }
 .hint { background: var(--accent-soft); padding: 6px 18px; display: flex; align-items: center; gap: 8px; }
 .hint b { color: var(--accent-text); font-size: 18px; }
 .hint[hidden] { display: none; }
+
+/* chip family selector; elements tagged mm32-only / fortior-only follow the active family */
+.family { background: var(--card); border-bottom: 1px solid var(--border); padding: 8px 18px; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
+.family .lbl { font-weight: 700; }
+.family .seg span { min-width: 190px; }
+@media (max-width: 520px) { .family .seg span { min-width: 0; } }
+body[data-family=mm32] .fortior-only, body[data-family=fortior] .mm32-only { display: none !important; }
+#opt { width: 90px; font-family: var(--mono); }
 
 /* layout */
 main { padding: 14px 16px; display: grid; grid-template-columns: 5fr 6fr; gap: 10px 16px; max-width: 1400px; margin: 0 auto; }
@@ -157,18 +165,26 @@ tbody tr.sel { background: var(--accent); color: #fff; }
 .radios label { display: flex; gap: 8px; align-items: center; padding: 3px 0; cursor: pointer; }
 </style>
 </head>
-<body>
+<body data-family="mm32">
 <header>
   <div>
-    <h1>MM32 Offline Programmer</h1>
-    <div class="sub">SWD production flasher &nbsp;·&nbsp; ESP8266 &nbsp;·&nbsp; Wi-Fi</div>
+    <h1>Offline Programmer</h1>
+    <div class="sub"><span id="subFamily">MM32 · SWD</span> production flasher &nbsp;·&nbsp; ESP8266 &nbsp;·&nbsp; Wi-Fi</div>
   </div>
   <div class="conn">
     <span class="host" id="host"></span>
     <span class="pill" id="pill">●&nbsp; Disconnected</span>
   </div>
 </header>
-<div class="hint" id="hint"><b>①</b><span id="hintText">Connecting to the programmer…</span></div>
+<div class="hint" id="hint"><b>①</b><span id="hintText">Connecting to the programmer… (join the MCU-Flasher-XXXX Wi-Fi, then open http://mcu-flasher.local)</span></div>
+<div class="family">
+  <span class="lbl">Chip family</span>
+  <div class="seg">
+    <label><input type="radio" name="family" value="mm32" class="conn-only"><span>MM32 (SWD)</span></label>
+    <label><input type="radio" name="family" value="fortior" class="conn-only"><span>Fortior FU68xx (FICE)</span></label>
+  </div>
+  <span class="muted">Switches the programmer immediately. Each family keeps its own stored firmware.</span>
+</div>
 
 <main>
   <div class="col">
@@ -191,9 +207,17 @@ tbody tr.sel { background: var(--accent); color: #fff; }
           <input type="file" id="file" accept=".hex,.ihx,.bin">
         </div>
         <div class="muted" id="fileDetail" style="margin:2px 0 8px">Intel HEX (.hex) or binary (.bin) from Keil</div>
+        <div class="row fortior-only" style="margin-bottom:8px">
+          <span>LVR</span>
+          <select id="lvr"><option>3.8 V</option><option>3.0 V</option><option>custom</option></select>
+          <span class="checks"><label><input type="checkbox" id="wdt">Watchdog enable</label></span>
+          <span>Option bytes</span>
+          <input type="text" id="opt" maxlength="11" spellcheck="false" autocomplete="off">
+        </div>
         <div class="row">
-          <span>For chip</span>
-          <select id="target" class="conn-only"><option>ANY</option></select>
+          <span class="mm32-only">For chip</span>
+          <select id="target" class="conn-only mm32-only"><option>ANY</option></select>
+          <span class="muted fortior-only" id="crcLbl"></span>
           <span class="fill"></span>
           <button class="btn accent conn-only" id="uploadBtn">Upload to programmer</button>
         </div>
@@ -209,20 +233,23 @@ tbody tr.sel { background: var(--accent); color: #fff; }
           <label><input type="radio" name="mode" value="button" class="conn-only"><span>Button press</span></label>
           <label><input type="radio" name="mode" value="auto" class="conn-only"><span>Auto-detect board</span></label>
         </div>
-        <span class="lbl">Erase</span>
-        <div class="seg">
+        <span class="lbl mm32-only">Erase</span>
+        <div class="seg mm32-only">
           <label><input type="radio" name="erase" value="chip" class="conn-only"><span>Full chip</span></label>
           <label><input type="radio" name="erase" value="pages" class="conn-only"><span>Only image pages</span></label>
         </div>
         <span class="lbl">After programming</span>
         <div class="checks">
-          <label><input type="checkbox" id="verify" class="conn-only">Verify</label>
+          <label><input type="checkbox" id="verify" class="conn-only">Verify<span class="fortior-only">&nbsp;(chip CRC)</span></label>
           <label><input type="checkbox" id="run" class="conn-only">Run firmware</label>
-          <label><input type="checkbox" id="protect" class="conn-only">Read-protect</label>
+          <label class="mm32-only"><input type="checkbox" id="protect" class="conn-only">Read-protect</label>
         </div>
-        <span class="lbl">SWD clock delay</span>
-        <div class="row"><input type="number" id="swdelay" min="0" max="250" step="1" class="conn-only">
+        <span class="lbl mm32-only">SWD clock delay</span>
+        <div class="row mm32-only"><input type="number" id="swdelay" min="0" max="250" step="1" class="conn-only">
           <span class="muted">0 = fastest; raise for long wires</span></div>
+        <span class="lbl fortior-only">FICE timing</span>
+        <div class="row fortior-only"><input type="number" id="speed" min="50" max="1000" step="10" class="conn-only">
+          <span class="muted">% of emulator timing; raise (e.g. 200) for long wires</span></div>
         <span class="lbl">Auto-detect settle</span>
         <div class="row"><input type="number" id="settle" min="0" max="10000" step="100" class="conn-only">
           <span class="muted">ms to wait after a board is detected</span></div>
@@ -261,10 +288,10 @@ tbody tr.sel { background: var(--accent); color: #fff; }
       <div class="card-head"><h2>Target tools</h2></div>
       <div class="card-body tools">
         <button class="btn conn-only" id="detectBtn">Detect chip</button>
-        <button class="btn conn-only" id="resetBtn">Reset target</button>
-        <button class="btn conn-only" id="chipsBtn">Chip table…</button>
+        <button class="btn conn-only" id="resetBtn"><span class="mm32-only">Reset target</span><span class="fortior-only">Reset &amp; run target</span></button>
+        <button class="btn conn-only mm32-only" id="chipsBtn">Chip table…</button>
         <button class="btn conn-only" id="eraseBtn">Erase chip</button>
-        <button class="btn conn-only" id="unlockBtn">Unlock (remove RDP)</button>
+        <button class="btn conn-only mm32-only" id="unlockBtn">Unlock (remove RDP)</button>
       </div>
     </section>
   </div>
@@ -310,15 +337,33 @@ tbody tr.sel { background: var(--accent); color: #fff; }
 
 <script>
 "use strict";
-const FLASH_BASE = 0x08000000;
+const FLASH_BASE = 0x08000000;            // MM32
+const FU_FLASH_SIZE = 0x4000;             // Fortior FU68xx: 16 KB at 0x0000
+const FU_OPT_ADDR = 0x3FFC;               // Keil appends 4 option bytes here
+const OPT_DEFAULT = "00F000FF";           // option bytes as Keil writes them; byte 1 bits 7:6 = LVR, byte 2 bit 5 = WDT
+const LVR_CHOICES = [["3.8 V", 0xC0], ["3.0 V", 0x80]];
+const LVR_MASK = 0xC0, WDT_BIT = 0x20;
+const FAMILIES = {
+  mm32: { name: "MM32", sub: "MM32 · SWD", verify: "Verifying",
+          erase: "Mass-erase the connected target?" },
+  fortior: { name: "Fortior FU68xx", sub: "Fortior FU68xx · FICE", verify: "Verifying (CRC)",
+             erase: "Erase the whole flash of the connected target?" },
+};
 const STATE_TEXT = { connect: "Connecting to target", erase: "Erasing", program: "Programming",
-                     verify: "Verifying", protect: "Setting read protection" };
+                     protect: "Setting read protection" };
+const stateText = (st) => (st === "verify" ? FAMILIES[S.family].verify : STATE_TEXT[st] || st);
 const $ = (id) => document.getElementById(id);
 const hex8 = (n) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(8, "0");
+const hex4 = (n) => "0x" + (n & 0xffff).toString(16).toUpperCase().padStart(4, "0");
+const toHex = (bytes) => [...bytes].map((b) => b.toString(16).toUpperCase().padStart(2, "0")).join("");
 const fmtInt = (n) => Number(n).toLocaleString("en-US");
+const store = {  // localStorage may be unavailable (private mode, captive-portal window)
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } },
+};
 
 // ------------------------------------------------------------------ image loading
-function parseIntelHex(text) {
+function parseIntelHex(text, fill = 0xff) {
   const mem = new Map();
   let upper = 0, ln = 0;
   for (let line of text.split(/\r?\n/)) {
@@ -341,12 +386,17 @@ function parseIntelHex(text) {
   if (!mem.size) throw new Error("no data records in file");
   let lo = Infinity, hi = -Infinity;
   for (const a of mem.keys()) { if (a < lo) lo = a; if (a > hi) hi = a; }
-  const buf = new Uint8Array(hi + 1 - lo).fill(0xff);
+  const buf = new Uint8Array(hi + 1 - lo).fill(fill);
   for (const [a, b] of mem) buf[a - lo] = b;
   return { base: lo, data: buf };
 }
 
-function loadImage(name, bytes) {
+// Parse a picked file for a chip family. Returns { base, data }.
+function loadImage(name, bytes, family) {
+  return family === "fortior" ? loadImageFortior(name, bytes) : loadImageMm32(name, bytes);
+}
+
+function loadImageMm32(name, bytes) {
   let base, data;
   if (/\.(hex|ihx)$/i.test(name)) ({ base, data } = parseIntelHex(new TextDecoder("ascii").decode(bytes)));
   else { base = FLASH_BASE; data = new Uint8Array(bytes); }
@@ -355,6 +405,40 @@ function loadImage(name, bytes) {
   if (!(FLASH_BASE <= base && base + data.length <= FLASH_BASE + 0x100000))
     throw new Error(`image at ${hex8(base)} is outside MM32 flash (0x08000000). Check the linker settings / IROM1 start in Keil.`);
   return { base, data };
+}
+
+// FU68xx: gaps are 0x00 (erased state), the image is placed at its address from 0x0000,
+// trailing 0x00 is trimmed and it must end before the option bytes at 0x3FFC.
+function loadImageFortior(name, bytes) {
+  let base = 0, data;
+  if (/\.(hex|ihx)$/i.test(name)) ({ base, data } = parseIntelHex(new TextDecoder("ascii").decode(bytes), 0x00));
+  else data = new Uint8Array(bytes);
+  let n = data.length;
+  while (n && data[n - 1] === 0) n--;  // trailing 0x00 is the erased state anyway
+  if (!n) throw new Error("the image is empty");
+  const end = base + n;
+  if (end > FU_OPT_ADDR) {
+    if (end > FU_FLASH_SIZE) throw new Error(`image ends at 0x${(end - 1).toString(16).toUpperCase().padStart(4, "0")}, beyond the 16 KB flash of the FU68xx.`);
+    throw new Error("image uses 0x3FFC-0x3FFF, where the programmer writes the option bytes.");
+  }
+  const out = new Uint8Array(end);
+  out.set(data.subarray(0, n), base);
+  return { base: 0, data: out };
+}
+
+// CRC-16/CCITT-FALSE, the algorithm of the FU68xx CRC unit Keil uses for verify.
+function crc16Ccitt(data, crc = 0xffff) {
+  for (const b of data) {
+    crc ^= b << 8;
+    for (let k = 0; k < 8; k++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc;
+}
+// CRC the chip reports after programming `data` (padded with 0x00 up to 0x3FFC) plus the option bytes.
+function chipCrc(data, opt) {
+  const img = new Uint8Array(FU_OPT_ADDR);
+  img.set(data.subarray(0, FU_OPT_ADDR));
+  return crc16Ccitt(opt, crc16Ccitt(img));
 }
 
 const CRC_TABLE = (() => {
@@ -407,7 +491,9 @@ async function request(cmd, timeoutMs = 20000) {
 // ------------------------------------------------------------------ state
 const S = {
   online: false, busy: false, deviceBusy: false, since: 0,
-  info: {}, chips: [], saved: null, image: null, lastDetect: null, identifyOpen: false, results: [],
+  info: {}, chips: [], chipsFresh: false, saved: null, image: null, lastDetect: null, identifyOpen: false, results: [],
+  family: FAMILIES[store.get("family", "mm32")] ? store.get("family", "mm32") : "mm32",  // best guess until INFO arrives
+  file: null,  // { name, bytes } of the picked file, re-parsed when the family changes
 };
 
 // ------------------------------------------------------------------ log / dialogs
@@ -487,7 +573,7 @@ function setOnline(on) {
     refreshDevice();
   } else {
     S.deviceBusy = false;
-    $("hintText").textContent = "Lost contact with the programmer. Make sure this device is still on the MM32-Flasher Wi-Fi.";
+    $("hintText").textContent = "Lost contact with the programmer. Make sure this device is still on the MCU-Flasher-XXXX Wi-Fi (http://mcu-flasher.local).";
     setBanner("Not connected", "Waiting for the programmer…", "off");
     log("Connection to the programmer lost", "err");
   }
@@ -495,35 +581,73 @@ function setOnline(on) {
 }
 
 // ------------------------------------------------------------------ device info
+const familyOf = (info) => (FAMILIES[info.family] ? info.family : "mm32");
+
+// INFO, plus CHIPS when the programmer runs MM32 and the chip table is not loaded yet (or `withChips`).
+async function readDevice(withChips = false) {
+  const info = parseKv(await request("INFO"));
+  let chips = S.chips;
+  if (familyOf(info) === "mm32" && (withChips || !S.chipsFresh)) {
+    chips = parseChips(await request("CHIPS"));
+    S.chipsFresh = true;
+  }
+  return [info, chips];
+}
+
 async function refreshDevice() {
-  await runBg("Refresh", async () => {
-    const info = parseKv(await request("INFO"));
-    const chips = parseChips(await request("CHIPS"));
-    applyDeviceInfo(info, chips);
-  }, true);
+  await runBg("Refresh", async () => applyDeviceInfo(...(await readDevice(true))), true);
+}
+
+// Show `fam` as the active family: page sections, settings, and the picked file re-parsed for it.
+function setFamily(fam) {
+  document.body.dataset.family = fam;
+  $("subFamily").textContent = FAMILIES[fam].sub;
+  syncFamilyRadios();
+  if (fam === S.family) return;
+  S.family = fam;
+  store.set("family", fam);
+  if (fam !== "mm32") S.chipsFresh = false;  // re-read the chip table when switching back
+  S.saved = null;                            // the other family has different settings
+  S.lastDetect = null;
+  log(`Chip family: ${FAMILIES[fam].name}`, "dim");
+  if (S.file) parseFile();
+}
+function syncFamilyRadios() {
+  document.querySelectorAll("input[name=family]").forEach((r) => { r.checked = r.value === S.family; });
 }
 
 function applyDeviceInfo(info, chips, quiet = false) {
-  const prevCrc = S.info.crc, prevImg = S.info.img;
+  const prevCrc = S.info.crc, prevImg = S.info.img, prevFam = S.family;
+  setFamily(familyOf(info));
+  if (prevFam !== S.family) quiet = false;
   S.info = info;
   S.chips = chips;
-  const sel = $("target"), want = sel.value || localStorage.getItem("target") || "ANY";
+  const sel = $("target"), want = sel.value || store.get("target", "ANY");
   sel.replaceChildren(...["ANY", ...chips.map((c) => c.name)].map((n) => new Option(n, n)));
   sel.value = [...sel.options].some((o) => o.value === want) ? want : "ANY";
 
   if (info.img === "1") {
-    const name = info.name || "-";
+    const name = info.name || "-", size = fmtInt(info.size || 0);
     $("devName").textContent = name !== "-" ? name : "(unnamed image)";
-    $("devDetail").textContent = `${fmtInt(info.size || 0)} bytes @ ${info.base}   ·   CRC ${info.crc}   ·   for ${info.target}   ·   fw ${info.fw}`;
-    if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
-      log(`Programmer holds ${name} (${fmtInt(info.size || 0)} bytes, CRC ${info.crc}, for ${info.target})`);
+    if (S.family === "fortior") {
+      $("devDetail").textContent = `${size} bytes   ·   options ${info.opt}   ·   chip CRC ${info.chipcrc}   ·   fw ${info.fw}`;
+      if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
+        log(`Programmer holds ${name} (${size} bytes, options ${info.opt}, chip CRC ${info.chipcrc})`);
+    } else {
+      $("devDetail").textContent = `${size} bytes @ ${info.base}   ·   CRC ${info.crc}   ·   for ${info.target}   ·   fw ${info.fw}`;
+      if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
+        log(`Programmer holds ${name} (${size} bytes, CRC ${info.crc}, for ${info.target})`);
+    }
   } else {
     $("devName").textContent = "No firmware stored";
-    $("devDetail").textContent = "Load a .hex file below and upload it to the programmer.";
+    $("devDetail").textContent = `No ${FAMILIES[S.family].name} firmware yet. Load a .hex file below and upload it to the programmer.`;
   }
   if ("mode" in info) {
-    const st = { mode: info.mode || "button", erase: info.erase || "chip", verify: info.verify || "1",
-                 run: info.run || "1", protect: info.protect || "0", swdelay: info.swdelay || "0", settle: info.settle || "500" };
+    const st = S.family === "fortior"
+      ? { mode: info.mode || "button", verify: info.verify || "1", run: info.run || "1",
+          speed: info.speed || "100", settle: info.settle || "500" }
+      : { mode: info.mode || "button", erase: info.erase || "chip", verify: info.verify || "1",
+          run: info.run || "1", protect: info.protect || "0", swdelay: info.swdelay || "0", settle: info.settle || "500" };
     const dirty = Object.keys(changedSettings()).length > 0;
     S.saved = st;
     if (!dirty) showSettings(st);  // don't throw away edits the user has not saved yet
@@ -542,39 +666,108 @@ function setCounts(p, f) {
 
 function storedCrc() { return S.info.img === "1" ? parseInt(S.info.crc, 16) >>> 0 : null; }
 
+const sameData = () => !!S.image && storedCrc() === S.image.crc;
+// Fortior: do the option bytes in the page match the ones stored with the image? (always true for MM32)
+function sameOpt() {
+  if (S.family !== "fortior") return true;
+  const opt = optBytes();
+  return opt !== null && (S.info.opt || "").toUpperCase() === toHex(opt);
+}
+
 function updateMatch() {
   const m = $("match"), stored = storedCrc();
+  const what = S.family === "fortior" ? "the file and options" : "the file";
   if (!S.online || !S.image || stored === null) { m.textContent = ""; m.className = "match"; }
-  else if (stored === S.image.crc) { m.textContent = "✓  Same as the file selected below"; m.className = "match same"; }
+  else if (sameData() && sameOpt()) { m.textContent = `✓  Same as ${what} selected below`; m.className = "match same"; }
+  else if (sameData()) { m.textContent = "⚠  Same file, but different option bytes — press Apply options"; m.className = "match diff"; }
   else { m.textContent = "⚠  Different from the file selected below — upload to replace it"; m.className = "match diff"; }
   updateUploadButton();
 }
 
 function updateUploadButton() {
   const b = $("uploadBtn");
-  const same = S.image && storedCrc() === S.image.crc;
-  b.textContent = same ? "Upload again" : "Upload to programmer";
+  const same = sameData() && sameOpt(), apply = sameData() && !same;
+  b.textContent = same ? "Upload again" : apply ? "Apply options" : "Upload to programmer";
   b.className = "btn conn-only" + (same ? "" : " accent");
-  if (!S.image) b.disabled = true;
+  if (!S.image || (S.family === "fortior" && optBytes() === null)) b.disabled = true;
 }
+
+// ------------------------------------------------------------------ Fortior option bytes <-> LVR / watchdog
+// The 4 option bytes from the entry, or null when it is not 8 hex digits.
+function optBytes() {
+  const text = $("opt").value.trim().replace(/\s+/g, "");
+  if (!/^[0-9a-f]{8}$/i.test(text)) return null;
+  return Uint8Array.from(text.match(/../g), (h) => parseInt(h, 16));
+}
+function optFromControls() {
+  const opt = optBytes() || Uint8Array.from(OPT_DEFAULT.match(/../g), (h) => parseInt(h, 16));
+  const lvr = LVR_CHOICES.find(([n]) => n === $("lvr").value);
+  if (lvr) opt[1] = (opt[1] & ~LVR_MASK & 0xff) | lvr[1];
+  opt[2] = $("wdt").checked ? opt[2] | WDT_BIT : opt[2] & ~WDT_BIT & 0xff;
+  $("opt").value = toHex(opt);
+  optChanged();
+}
+function controlsFromOpt() {
+  const opt = optBytes();
+  if (opt) {
+    const lvr = LVR_CHOICES.find(([, v]) => v === (opt[1] & LVR_MASK));
+    $("lvr").value = lvr ? lvr[0] : "custom";
+    $("wdt").checked = !!(opt[2] & WDT_BIT);
+  }
+  optChanged();
+}
+function optChanged() {
+  const opt = optBytes();
+  if (opt) store.set("fortior.opt", toHex(opt));
+  if (opt === null) $("crcLbl").textContent = "Option bytes must be 8 hex digits, e.g. 00F000FF";
+  else if (S.image && S.family === "fortior") $("crcLbl").textContent = `Expected chip CRC ${hex4(chipCrc(S.image.data, opt))}`;
+  else $("crcLbl").textContent = "";
+  updateMatch();
+  updateEnabled();
+}
+$("lvr").addEventListener("change", optFromControls);
+$("wdt").addEventListener("change", optFromControls);
+$("opt").addEventListener("input", controlsFromOpt);
 
 // ------------------------------------------------------------------ image file
 $("file").addEventListener("change", async (e) => {
   const f = e.target.files[0];
   e.target.value = "";
   if (!f) return;
-  try {
-    const { base, data } = loadImage(f.name, await f.arrayBuffer());
-    S.image = { name: f.name, base, data, crc: crc32(data) };
-  } catch (err) { showError(`Cannot load image: ${err.message}`); return; }
-  const im = S.image;
-  $("fileName").textContent = im.name;
-  $("fileDetail").textContent = `${fmtInt(im.data.length)} bytes   ·   ${hex8(im.base)} – ${hex8(im.base + im.data.length - 1)}   ·   CRC ${hex8(im.crc)}`;
-  log(`Selected ${im.name} (${fmtInt(im.data.length)} bytes @ ${hex8(im.base)})`);
-  setProgress("upBar", 0);
-  updateMatch();
-  updateEnabled();
+  const file = { name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) };
+  try { loadImage(file.name, file.bytes, S.family); } catch (err) { showError(`Cannot load image: ${err.message}`); return; }
+  S.file = file;
+  parseFile();
 });
+
+// (Re-)parse the picked file for the active family. On a family switch an invalid file is dropped.
+function parseFile() {
+  const { name, bytes } = S.file, fam = S.family;
+  try {
+    const { base, data } = loadImage(name, bytes, fam);
+    S.image = { name, base, data, crc: crc32(data) };
+  } catch (err) {
+    S.file = S.image = null;
+    $("fileName").textContent = "No file selected";
+    $("fileDetail").textContent = `${name} is not valid for ${FAMILIES[fam].name} (${err.message}) — select another file.`;
+    log(`${name} cleared: not valid for ${FAMILIES[fam].name}: ${err.message}`, "err");
+    setProgress("upBar", 0);
+    optChanged();
+    return;
+  }
+  const im = S.image, end = im.base + im.data.length - 1;
+  $("fileName").textContent = im.name;
+  if (fam === "fortior") {
+    const a = (n) => "0x" + n.toString(16).toUpperCase().padStart(4, "0");
+    $("fileDetail").textContent = `${fmtInt(im.data.length)} bytes   ·   0x0000 – ${a(end)}   ·   CRC ${hex8(im.crc)}`;
+    log(`Selected ${im.name} (${fmtInt(im.data.length)} bytes, 0x0000-${a(end)}) for ${FAMILIES[fam].name}`);
+  } else {
+    $("fileDetail").textContent = `${fmtInt(im.data.length)} bytes   ·   ${hex8(im.base)} – ${hex8(end)}   ·   CRC ${hex8(im.crc)}`;
+    log(`Selected ${im.name} (${fmtInt(im.data.length)} bytes @ ${hex8(im.base)})`);
+  }
+  setProgress("upBar", 0);
+  optChanged();  // updates the expected chip CRC, the match label and the buttons
+}
 
 function uploadXhr(url, form) {
   return new Promise((resolve, reject) => {
@@ -592,23 +785,40 @@ function uploadXhr(url, form) {
 $("uploadBtn").onclick = () => {
   if (!S.image) { dialog("No file", "Select a firmware file first."); return; }
   const { name, base, data, crc } = S.image;
-  const target = $("target").value || "ANY";
-  const chip = S.chips.find((c) => c.name === target);
-  if (chip && base + data.length > FLASH_BASE + chip.kb * 1024) {
-    showError(`Image (${fmtInt(data.length)} bytes) does not fit ${target} (${chip.kb} KB).`);
-    return;
+  let fields, extra = "";
+  if (S.family === "fortior") {
+    const opt = optBytes();
+    if (opt === null) { showError("Option bytes must be 8 hex digits, e.g. 00F000FF."); return; }
+    fields = toHex(opt);
+    extra = `, options ${fields}`;
+    if (sameData() && !sameOpt()) {  // same image, only the option bytes differ: no need to re-upload
+      runBg("Apply options", async () => {
+        const info = parseKv(await request(`OPT ${fields}`));
+        log(`Option bytes set to ${fields}`, "ok");
+        applyDeviceInfo(info, S.chips);
+      });
+      return;
+    }
+  } else {
+    const target = $("target").value || "ANY";
+    const chip = S.chips.find((c) => c.name === target);
+    if (chip && base + data.length > FLASH_BASE + chip.kb * 1024) {
+      showError(`Image (${fmtInt(data.length)} bytes) does not fit ${target} (${chip.kb} KB).`);
+      return;
+    }
+    store.set("target", target);
+    fields = `${hex8(base)} ${target}`;
   }
-  try { localStorage.setItem("target", target); } catch (e) { /* storage unavailable */ }
   runBg("Upload", async () => {
     const safe = name.replace(/\s+/g, "_").slice(0, 40);
-    const q = new URLSearchParams({ size: data.length, crc: hex8(crc), base: hex8(base), target, name: safe });
+    const q = new URLSearchParams({ size: data.length, crc: hex8(crc), fields, name: safe });
     const form = new FormData();
     form.append("file", new Blob([data], { type: "application/octet-stream" }), safe);
     const t0 = performance.now();
     setProgress("upBar", 0);
     const info = parseReply("UPLOAD", await uploadXhr("/api/upload?" + q, form));
     setProgress("upBar", 100);
-    log(`Uploaded ${safe}: ${fmtInt(data.length)} bytes in ${((performance.now() - t0) / 1000).toFixed(1)}s, CRC ${hex8(crc)} verified`, "ok");
+    log(`Uploaded ${safe}: ${fmtInt(data.length)} bytes in ${((performance.now() - t0) / 1000).toFixed(1)}s, CRC ${hex8(crc)} verified${extra}`, "ok");
     applyDeviceInfo(parseKv(info), S.chips);
   });
 };
@@ -616,18 +826,21 @@ $("uploadBtn").onclick = () => {
 // ------------------------------------------------------------------ settings
 const radio = (name) => (document.querySelector(`input[name=${name}]:checked`) || {}).value;
 function currentSettings() {
+  // Only the active family's keys: the firmware rejects the other family's settings.
   const num = (id, d) => { const v = parseInt($(id).value, 10); return Number.isFinite(v) ? String(v) : d; };
-  return { mode: radio("mode"), erase: radio("erase"), verify: $("verify").checked ? "1" : "0",
-           run: $("run").checked ? "1" : "0", protect: $("protect").checked ? "1" : "0",
+  const common = { mode: radio("mode"), verify: $("verify").checked ? "1" : "0", run: $("run").checked ? "1" : "0" };
+  if (S.family === "fortior") return { ...common, speed: num("speed", "100"), settle: num("settle", "500") };
+  return { ...common, erase: radio("erase"), protect: $("protect").checked ? "1" : "0",
            swdelay: num("swdelay", "0"), settle: num("settle", "500") };
 }
 function showSettings(st) {
   document.querySelectorAll("input[name=mode]").forEach((r) => { r.checked = r.value === st.mode; });
-  document.querySelectorAll("input[name=erase]").forEach((r) => { r.checked = r.value === st.erase; });
+  if ("erase" in st) document.querySelectorAll("input[name=erase]").forEach((r) => { r.checked = r.value === st.erase; });
   $("verify").checked = st.verify === "1";
   $("run").checked = st.run === "1";
-  $("protect").checked = st.protect === "1";
-  $("swdelay").value = st.swdelay;
+  if ("protect" in st) $("protect").checked = st.protect === "1";
+  if ("swdelay" in st) $("swdelay").value = st.swdelay;
+  if ("speed" in st) $("speed").value = st.speed;
   $("settle").value = st.settle;
   updateSettingsState();
 }
@@ -671,6 +884,12 @@ $("flashBtn").onclick = () => {
 };
 $("detectBtn").onclick = () => runBg("Detect", async () => {
   const info = parseKv(await request("DETECT", 15000));
+  if (S.family === "fortior") {
+    const msg = `${info.chip}  ·  ID ${info.id}  ·  FICE timing ${info.speed}%`;
+    log(`Detected ${msg}`, "ok");
+    setBanner("Chip detected", msg, "ok");
+    return;
+  }
   S.lastDetect = info;
   const msg = `${info.chip}  ·  DEV_ID ${info.devid}  ·  ${info.flash} KB flash  ·  read-protected: ${info.protected === "1" ? "yes" : "no"}  ·  SWD delay ${info.swdelay}`;
   log(`Detected ${msg}`, "ok");
@@ -678,9 +897,12 @@ $("detectBtn").onclick = () => runBg("Detect", async () => {
   setBanner(unknown ? "Unknown chip" : "Chip detected", msg, unknown ? "err" : "ok");
   if (unknown) setTimeout(() => askIdentify(info.devid || ""), 0);
 });
-$("resetBtn").onclick = () => runBg("Reset", async () => { await request("RESET", 15000); log("Target reset", "ok"); });
+$("resetBtn").onclick = () => runBg("Reset", async () => {
+  await request("RESET", 15000);
+  log(S.family === "fortior" ? "Target reset and released — the firmware runs" : "Target reset", "ok");
+});
 $("eraseBtn").onclick = async () => {
-  if (!(await confirmBox("Erase chip", "Mass-erase the connected target?", { okText: "Erase", danger: true }))) return;
+  if (!(await confirmBox("Erase chip", FAMILIES[S.family].erase, { okText: "Erase", danger: true }))) return;
   runBg("Erase", async () => { await request("ERASE", 20000); log("Target erased", "ok"); });
 };
 $("unlockBtn").onclick = async () => {
@@ -722,6 +944,7 @@ function fillChips() {
 }
 function chipsDialog() {
   if (!S.online) { dialog("Not connected", "Connect to the programmer first."); return; }
+  if (S.family !== "mm32") return;
   chipSel = null;
   fillChips();
   $("chipsDlg").showModal();
@@ -756,7 +979,7 @@ $("cDel").onclick = () => {
 // An unknown DEV_ID was read: let the user say which chip it is, then teach the programmer.
 function askIdentify(devid) {
   const dev = parseInt(devid, 16) >>> 0;
-  if (!dev || S.identifyOpen) return;
+  if (!dev || S.identifyOpen || S.family !== "mm32") return;
   const pending = S.chips.filter((c) => c.id === 0);
   S.identifyOpen = true;
   $("identText").textContent = `The connected chip reports DEV_ID ${hex8(dev)}, which the programmer does not know yet.\n` +
@@ -829,7 +1052,7 @@ function onDeviceLine(line) {
     if (p[2] === "idle") { setDeviceBusy(false); return; }
     setDeviceBusy(true);
     if (p[2] === "connect") setProgress("progBar", 0);
-    setBanner((STATE_TEXT[p[2]] || p[2]) + "…", "", "busy");
+    setBanner(stateText(p[2]) + "…", "", "busy");
   } else if (ev === "PROGRESS") {
     setProgress("progBar", +p[3]);
     $("bMsg").textContent = `${p[2][0].toUpperCase()}${p[2].slice(1)}  ${p[3]}%`;
@@ -844,8 +1067,25 @@ function onDeviceLine(line) {
     }
   } else if (ev === "RESULT") onResult(line);
   else if (ev === "BOOT") { log("Programmer restarted", "dim"); refreshDevice(); }
-  else log(line, "dim");
+  else if (ev === "FAMILY") {
+    // Possibly switched by another client: follow it, then re-read the image / settings of that family.
+    if (FAMILIES[p[2]] && p[2] !== S.family) setFamily(p[2]);
+    lastInfoPoll = 0;  // if a refresh can't run right now, the next poll does it
+    refreshDevice();
+  } else log(line, "dim");
 }
+
+// Family selector: switches the programmer right away (not via "Save to programmer").
+document.querySelectorAll("input[name=family]").forEach((r) => r.addEventListener("change", async () => {
+  const fam = r.value;
+  if (fam !== S.family && !S.deviceBusy)
+    await runBg("Switch family", async () => {
+      await request(`SET family ${fam}`);
+      applyDeviceInfo(...(await readDevice(true)));
+      log(`Programmer switched to ${FAMILIES[fam].name}`, "ok");
+    });
+  syncFamilyRadios();  // reflect the programmer's family, also when the switch failed
+}));
 
 let failures = 0, lastInfoPoll = 0;
 async function poll() {
@@ -863,7 +1103,7 @@ async function poll() {
     // Settings / image may also be changed from the desktop app over USB: re-read now and then.
     if (!S.deviceBusy && !S.busy && Date.now() - lastInfoPoll > 10000) {
       lastInfoPoll = Date.now();
-      runBg("Refresh", async () => applyDeviceInfo(parseKv(await request("INFO")), S.chips, true), true);
+      runBg("Refresh", async () => applyDeviceInfo(...(await readDevice()), true), true);
     }
   } catch (e) {
     if (++failures >= 3) setOnline(false);
@@ -883,6 +1123,9 @@ if (matchMedia("(pointer: coarse)").matches) {
 }
 
 $("host").textContent = location.host;
+$("opt").value = store.get("fortior.opt", OPT_DEFAULT);
+setFamily(S.family);
+controlsFromOpt();
 setBanner("Not connected", "Connecting to the programmer…", "off");
 updateEnabled();
 poll();

@@ -3,7 +3,10 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-tools/flash_log.csv
 __pycache__/
+tools/flash_log*.csv
 tools/ui_prefs.json
 src/web_page.h
+# Logic-analyzer CSV exports are 35-41 MB each: commit them xz-compressed (xz -9 -k file.csv,
+# about 2.5 MB; re/fice_decode.py reads .csv.xz directly) or as the Saleae .sal session.
+captures/**/*.csv

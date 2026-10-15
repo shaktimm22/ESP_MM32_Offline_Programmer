@@ -129,9 +129,10 @@ static void handleUploadData() {
         s_upReply = "@ERR BEGIN programmer is busy flashing";
         break;
       }
+      String fields = s_server.arg("fields");
+      fields.trim();
       String line = "BEGIN " + token(s_server.arg("size"), "0") + " " + token(s_server.arg("crc"), "0") + " " +
-                    token(s_server.arg("base"), "0x08000000") + " " + token(s_server.arg("target"), "ANY") + " " +
-                    token(s_server.arg("name"), "web_upload");
+                    fields + " " + token(s_server.arg("name"), "web_upload");
       s_upReply = s_hooks.command(line.c_str());
       s_upFailed = !s_upReply.startsWith("@OK");
       break;

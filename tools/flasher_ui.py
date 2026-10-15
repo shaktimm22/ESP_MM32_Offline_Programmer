@@ -1,8 +1,8 @@
-"""MM32 Offline Programmer - desktop UI.
+"""Offline Programmer - desktop UI (MM32 over SWD, Fortior FU68xx over FICE).
 
-Talks to the ESP8266 programmer over UART. Loads an Intel HEX / BIN file,
-uploads it to the programmer's flash, configures the programmer, and shows
-live pass/fail counters.
+Talks to the ESP8266 programmer over UART. Selects the chip family, loads an
+Intel HEX / BIN file, uploads it to the programmer's flash, configures the
+programmer, and shows live pass/fail counters.
 
 Requires: Python 3.8+, pyserial  (pip install pyserial)
 """
@@ -22,17 +22,54 @@ from tkinter import filedialog, messagebox, ttk
 import serial
 import serial.tools.list_ports
 
-APP_TITLE = "MM32 Offline Programmer"
+APP_TITLE = "Offline Programmer"
 DEFAULT_BAUD = 460800
 CHUNK = 256
-FLASH_BASE = 0x08000000
 LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flash_log.csv")
+
+# Chip families the firmware supports ("SET family <key>"). Settings lists the family-specific
+# programmer settings; mode, verify, run and settle are common to all.
+FAMILIES = {
+    "mm32": {"label": "MM32  ·  SWD", "name": "MM32", "iface": "SWD", "settings": ("erase", "protect", "swdelay")},
+    "fortior": {"label": "Fortior FU68xx  ·  FICE", "name": "Fortior FU68xx", "iface": "FICE",
+                "settings": ("speed",)},
+}
+COMMON_SETTINGS = ("mode", "verify", "run", "settle")
+SETTING_DEFAULTS = {"mode": "button", "verify": "1", "run": "1", "settle": "500", "erase": "chip", "protect": "0",
+                    "swdelay": "0", "speed": "100"}
+
+# MM32
+FLASH_BASE = 0x08000000
+
+# Fortior FU68xx
+FU68_FLASH_SIZE = 0x4000
+OPT_ADDR = 0x3FFC  # Keil appends 4 option bytes here (mirrored into CCFG 0x401C..0x401E)
+# Option bytes as Keil writes them (from captures). 0x3FFD bits 7:6 = LVR, 0x3FFE bit 5 = WDT enable.
+OPT_DEFAULT = "00F000FF"
+LVR_CHOICES = [("3.8 V", 0xC0), ("3.0 V", 0x80)]  # values verified against Keil captures
+LVR_MASK = 0xC0
+WDT_BIT = 0x20
+
+
+def crc16_ccitt(data, crc=0xFFFF):
+    """CRC-16/CCITT-FALSE, the algorithm of the FU68xx CRC unit Keil uses for verify."""
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def chip_crc(data, opt):
+    """CRC the FU68xx reports after programming `data` (padded with 0x00) plus the option bytes."""
+    img = bytes(data[:OPT_ADDR]) + bytes(OPT_ADDR - min(len(data), OPT_ADDR))
+    return crc16_ccitt(bytes.fromhex(opt), crc16_ccitt(img))
 
 
 # --------------------------------------------------------------------------- image loading
 
-def parse_intel_hex(text):
-    """Return (base_address, bytearray) for an Intel HEX file; gaps are filled with 0xFF."""
+def parse_intel_hex(text, fill=0xFF):
+    """Return (base_address, bytearray) for an Intel HEX file; gaps are filled with `fill`."""
     mem = {}
     upper = 0
     for ln, line in enumerate(text.splitlines(), 1):
@@ -64,14 +101,20 @@ def parse_intel_hex(text):
     if not mem:
         raise ValueError("no data records in file")
     lo, hi = min(mem), max(mem) + 1
-    buf = bytearray(b"\xff" * (hi - lo))
+    buf = bytearray(bytes([fill]) * (hi - lo))
     for a, b in mem.items():
         buf[a - lo] = b
     return lo, buf
 
 
-def load_image(path):
-    """Load .hex or .bin. Returns (base, bytes) aligned/padded for halfword+word access."""
+def load_image(path, family):
+    """Load .hex or .bin for a chip family. Returns (base, bytes)."""
+    loader = load_fu68_image if family == "fortior" else load_mm32_image
+    return loader(path)
+
+
+def load_mm32_image(path):
+    """MM32: (base, bytes) aligned/padded for halfword+word access; gaps are 0xFF (erased)."""
     if path.lower().endswith((".hex", ".ihx")):
         with open(path, "r", encoding="ascii", errors="replace") as f:
             base, data = parse_intel_hex(f.read())
@@ -87,6 +130,26 @@ def load_image(path):
         raise ValueError(f"image at 0x{base:08X} is outside MM32 flash (0x08000000). "
                          "Check the linker settings / IROM1 start in Keil.")
     return base, bytes(data)
+
+
+def load_fu68_image(path):
+    """Fortior FU68xx: the image as bytes from address 0x0000; gaps are 0x00 (erased)."""
+    if path.lower().endswith((".hex", ".ihx")):
+        with open(path, "r", encoding="ascii", errors="replace") as f:
+            base, data = parse_intel_hex(f.read(), fill=0x00)
+        data = bytearray(base) + data  # place at its address; flash starts at 0x0000
+    else:
+        with open(path, "rb") as f:
+            data = bytearray(f.read())
+    while data and data[-1] == 0:  # trailing 0x00 is the erased state anyway
+        data.pop()
+    if not data:
+        raise ValueError("the image is empty")
+    if len(data) > OPT_ADDR:
+        if len(data) > FU68_FLASH_SIZE:
+            raise ValueError(f"image ends at 0x{len(data) - 1:04X}, beyond the 16 KB flash of the FU68xx.")
+        raise ValueError(f"image uses 0x{OPT_ADDR:04X}-0x3FFF, where the programmer writes the option bytes.")
+    return 0, bytes(data)
 
 
 # --------------------------------------------------------------------------- serial link
@@ -250,7 +313,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         screen_h = self.winfo_screenheight()
-        self.geometry(f"1200x{min(920, screen_h - 80)}")
+        self.geometry(f"1200x{min(960, screen_h - 80)}")
         self.minsize(1060, 760)
         if screen_h < 1000:
             self.state("zoomed")  # small laptop screens: use the whole screen
@@ -258,7 +321,13 @@ class App(tk.Tk):
         self.ui_q = queue.Queue()
         self.link = SerialLink(self.ui_q.put)
         self.prefs = load_prefs()
-        self.image = None          # (path, base, data, crc)
+        files = self.prefs.setdefault("files", {})  # last file per family
+        if "last_file" in self.prefs:  # prefs from the single-family UI
+            files.setdefault(self.prefs.get("family", "mm32"), self.prefs.pop("last_file"))
+        self.family = self.prefs.get("family", "mm32")
+        if self.family not in FAMILIES:
+            self.family = "mm32"
+        self.image = None          # (path, base, data, crc), loaded for self.family
         self.chips = []
         self.dev_info = {}
         self.last_detect = None
@@ -266,15 +335,14 @@ class App(tk.Tk):
         self.device_busy = False   # the programmer is flashing
         self.suppress_set = False  # don't echo settings back while loading them
         self.conn_widgets = []     # enabled only while connected
+        self.tool_btns = []
         self.pulse_on = False
 
         self._styles()
         self._build()
         self.refresh_ports()
         self._set_connected(False)
-        last = self.prefs.get("last_file")
-        if last and os.path.exists(last):
-            self._load_file(last, quiet=True)
+        self._show_family(self.family)
         self.bind("<F5>", lambda e: self.flash_now())
         self.bind("<Control-o>", lambda e: self.browse())
         self.after(50, self._drain)
@@ -410,8 +478,9 @@ class App(tk.Tk):
         header.pack(fill="x")
         title = ttk.Frame(header, style="Header.TFrame")
         title.pack(side="left")
-        ttk.Label(title, text="MM32 Offline Programmer", style="HeaderTitle.TLabel").pack(anchor="w")
-        ttk.Label(title, text="SWD production flasher  ·  ESP8266", style="HeaderSub.TLabel").pack(anchor="w")
+        ttk.Label(title, text="Offline Programmer", style="HeaderTitle.TLabel").pack(anchor="w")
+        self.header_sub = ttk.Label(title, text="", style="HeaderSub.TLabel")
+        self.header_sub.pack(anchor="w")
 
         conn = ttk.Frame(header, style="Header.TFrame")
         conn.pack(side="right")
@@ -468,6 +537,16 @@ class App(tk.Tk):
         card = self._card(parent, "On the programmer", "2", action=("Refresh", self.refresh_device))
         card.pack(fill="x")
         b = card.body
+        row = ttk.Frame(b, style="Card.TFrame")
+        row.pack(fill="x", pady=(0, 8))
+        ttk.Label(row, text="Chip family", style="Card.TLabel").pack(side="left", padx=(0, 12))
+        self.family_var = tk.StringVar(value=self.family)
+        self.family_btns = []
+        for key, fam in FAMILIES.items():
+            btn = ttk.Radiobutton(row, text=fam["label"], value=key, variable=self.family_var, width=22,
+                                  style="Seg.Toolbutton", command=self.pick_family)
+            btn.pack(side="left")
+            self.family_btns.append(btn)
         self.dev_name = ttk.Label(b, text="—", style="FileName.TLabel")
         self.dev_name.pack(anchor="w")
         self.dev_detail = ttk.Label(b, text="Connect to see the stored firmware.", style="Muted.TLabel")
@@ -487,18 +566,87 @@ class App(tk.Tk):
         ttk.Button(row, text="Browse…", command=self.browse).pack(side="right")
         self.img_lbl = ttk.Label(b, text="Intel HEX (.hex) or binary (.bin) from Keil", style="Muted.TLabel")
         self.img_lbl.pack(anchor="w", pady=(2, 8))
-        row = ttk.Frame(b, style="Card.TFrame")
+
+        # Fortior: option bytes Keil sets in "Fortior C51 FICE Driver Setting" (written to 0x3FFC..0x3FFF).
+        self.opt_row = row = ttk.Frame(b, style="Card.TFrame")
+        ttk.Label(row, text="LVR", style="Card.TLabel").pack(side="left")
+        self.lvr_var = tk.StringVar()
+        lvr = ttk.Combobox(row, textvariable=self.lvr_var, width=8, state="readonly",
+                           values=[n for n, _ in LVR_CHOICES] + ["custom"])
+        lvr.pack(side="left", padx=(6, 14))
+        self.wdt_var = tk.BooleanVar()
+        ttk.Checkbutton(row, text="Watchdog enable", variable=self.wdt_var, style="Card.TCheckbutton").pack(
+            side="left")
+        ttk.Label(row, text="Option bytes", style="Card.TLabel").pack(side="left", padx=(14, 6))
+        self.opt_var = tk.StringVar(value=self.prefs.get("opt", OPT_DEFAULT))
+        ttk.Entry(row, textvariable=self.opt_var, width=10, font=(MONO, 10)).pack(side="left")
+        self._opt_sync = False
+        self.lvr_var.trace_add("write", lambda *a: self._opt_from_controls())
+        self.wdt_var.trace_add("write", lambda *a: self._opt_from_controls())
+        self.opt_var.trace_add("write", lambda *a: self._controls_from_opt())
+
+        self.upload_row = row = ttk.Frame(b, style="Card.TFrame")
         row.pack(fill="x")
-        ttk.Label(row, text="For chip", style="Card.TLabel").pack(side="left")
-        self.target_var = tk.StringVar(value=self.prefs.get("target", "ANY"))
-        self.target_cb = self._track(ttk.Combobox(row, textvariable=self.target_var, width=14, state="readonly",
-                                                  values=["ANY"]))
-        self.target_cb.pack(side="left", padx=8)
         self.upload_btn = self._track(ttk.Button(row, text="Upload to programmer", style="Accent.TButton",
                                                  command=self.upload))
         self.upload_btn.pack(side="right")
+        # MM32: which chip the image is for. Fortior: the CRC the chip must report.
+        self.target_box = ttk.Frame(row, style="Card.TFrame")
+        ttk.Label(self.target_box, text="For chip", style="Card.TLabel").pack(side="left")
+        self.target_var = tk.StringVar(value=self.prefs.get("target", "ANY"))
+        self.target_cb = self._track(ttk.Combobox(self.target_box, textvariable=self.target_var, width=14,
+                                                  state="readonly", values=["ANY"]))
+        self.target_cb.pack(side="left", padx=8)
+        self.crc_lbl = ttk.Label(row, text="", style="Muted.TLabel")
         self.up_prog = ttk.Progressbar(b, maximum=100)
         self.up_prog.pack(fill="x", pady=(10, 0))
+        self._controls_from_opt()
+
+    # ---- Fortior option bytes <-> LVR / watchdog controls
+    def _opt_bytes(self):
+        """The 4 option bytes from the entry, or None when it is not 8 hex digits."""
+        text = self.opt_var.get().strip().replace(" ", "")
+        if not re.fullmatch(r"[0-9A-Fa-f]{8}", text):
+            return None
+        return bytearray(bytes.fromhex(text))
+
+    def _opt_from_controls(self):
+        if self._opt_sync:
+            return
+        opt = self._opt_bytes() or bytearray(bytes.fromhex(OPT_DEFAULT))
+        lvr = dict(LVR_CHOICES).get(self.lvr_var.get())
+        if lvr is not None:
+            opt[1] = (opt[1] & ~LVR_MASK & 0xFF) | lvr
+        opt[2] = (opt[2] | WDT_BIT) if self.wdt_var.get() else (opt[2] & ~WDT_BIT & 0xFF)
+        self._opt_sync = True
+        self.opt_var.set(opt.hex().upper())
+        self._opt_sync = False
+        self._update_crc()
+
+    def _controls_from_opt(self):
+        if self._opt_sync:
+            return
+        opt = self._opt_bytes()
+        self._opt_sync = True
+        if opt:
+            names = {v: n for n, v in LVR_CHOICES}
+            self.lvr_var.set(names.get(opt[1] & LVR_MASK, "custom"))
+            self.wdt_var.set(bool(opt[2] & WDT_BIT))
+        self._opt_sync = False
+        self._update_crc()
+
+    def _update_crc(self):
+        if not hasattr(self, "crc_lbl") or self.family != "fortior":
+            return
+        opt = self._opt_bytes()
+        if opt is None:
+            self.crc_lbl.configure(text="Option bytes must be 8 hex digits, e.g. 00F000FF")
+        elif self.image:
+            self.crc_lbl.configure(text=f"Expected chip CRC 0x{chip_crc(self.image[2], opt.hex()):04X}")
+        else:
+            self.crc_lbl.configure(text="")
+        if hasattr(self, "match_lbl"):
+            self._update_match()
 
     def _build_settings_card(self, parent):
         card = self._card(parent, "Programmer settings")
@@ -506,13 +654,25 @@ class App(tk.Tk):
         b = card.body
         b.columnconfigure(1, weight=1)
 
-        def label(row, text):
-            ttk.Label(b, text=text, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
+        # Rows that only apply to one family: family -> widgets to grid / grid_remove.
+        self.family_rows = {key: [] for key in FAMILIES}
 
-        def seg(row, text, var, options):
-            label(row, text)
+        def label(row, text, family=None):
+            lbl = ttk.Label(b, text=text, style="Card.TLabel")
+            lbl.grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
+            if family:
+                self.family_rows[family].append(lbl)
+
+        def cell(row, family=None):
             f = ttk.Frame(b, style="Card.TFrame")
             f.grid(row=row, column=1, sticky="w", pady=3)
+            if family:
+                self.family_rows[family].append(f)
+            return f
+
+        def seg(row, text, var, options, family=None):
+            label(row, text, family)
+            f = cell(row, family)
             for value, opt in options:
                 self._track(ttk.Radiobutton(f, text=opt, value=value, variable=var, width=17,
                                             style="Seg.Toolbutton")).pack(side="left")
@@ -520,30 +680,36 @@ class App(tk.Tk):
         self.mode_var = tk.StringVar(value="button")
         self.erase_var = tk.StringVar(value="chip")
         seg(0, "Start flashing by", self.mode_var, [("button", "Button press"), ("auto", "Auto-detect board")])
-        seg(1, "Erase", self.erase_var, [("chip", "Full chip"), ("pages", "Only image pages")])
+        seg(1, "Erase", self.erase_var, [("chip", "Full chip"), ("pages", "Only image pages")], "mm32")
 
         label(2, "After programming")
-        checks = ttk.Frame(b, style="Card.TFrame")
-        checks.grid(row=2, column=1, sticky="w", pady=3)
+        checks = cell(2)
         self.verify_var = tk.BooleanVar(value=True)
         self.run_var = tk.BooleanVar(value=True)
         self.protect_var = tk.BooleanVar(value=False)
-        for text, var in (("Verify", self.verify_var), ("Run firmware", self.run_var),
-                          ("Read-protect", self.protect_var)):
-            self._track(ttk.Checkbutton(checks, text=text, variable=var, style="Card.TCheckbutton")).pack(
-                side="left", padx=(0, 16))
+        self.verify_chk = self._track(ttk.Checkbutton(checks, text="Verify", variable=self.verify_var,
+                                                      style="Card.TCheckbutton"))
+        self.verify_chk.pack(side="left", padx=(0, 16))
+        self._track(ttk.Checkbutton(checks, text="Run firmware", variable=self.run_var,
+                                    style="Card.TCheckbutton")).pack(side="left", padx=(0, 16))
+        self.protect_chk = self._track(ttk.Checkbutton(checks, text="Read-protect", variable=self.protect_var,
+                                                       style="Card.TCheckbutton"))
+        self.protect_chk.pack(side="left", padx=(0, 16))
 
-        def number(row, text, var, hi, step, hint):
-            label(row, text)
-            f = ttk.Frame(b, style="Card.TFrame")
-            f.grid(row=row, column=1, sticky="w", pady=3)
-            self._track(ttk.Spinbox(f, from_=0, to=hi, increment=step, width=7, textvariable=var)).pack(side="left")
+        def number(row, text, var, lo, hi, step, hint, family=None):
+            label(row, text, family)
+            f = cell(row, family)
+            self._track(ttk.Spinbox(f, from_=lo, to=hi, increment=step, width=7, textvariable=var)).pack(
+                side="left")
             ttk.Label(f, text=hint, style="Muted.TLabel").pack(side="left", padx=(10, 0))
 
         self.swdelay_var = tk.StringVar(value="0")
+        self.speed_var = tk.StringVar(value="100")
         self.settle_var = tk.StringVar(value="500")
-        number(3, "SWD clock delay", self.swdelay_var, 250, 1, "0 = fastest; raise for long wires")
-        number(4, "Auto-detect settle", self.settle_var, 10000, 100, "ms to wait after a board is detected")
+        number(3, "SWD clock delay", self.swdelay_var, 0, 250, 1, "0 = fastest; raise for long wires", "mm32")
+        number(3, "FICE timing", self.speed_var, 50, 1000, 10, "% of emulator timing; raise (e.g. 200) for long wires",
+               "fortior")
+        number(4, "Auto-detect settle", self.settle_var, 0, 10000, 100, "ms to wait after a board is detected")
 
         tk.Frame(b, bg=C["border"], height=1).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 6))
         foot = ttk.Frame(b, style="Card.TFrame")
@@ -556,8 +722,10 @@ class App(tk.Tk):
         self.revert_btn.pack(side="right", padx=(0, 8))
 
         self._saved_settings = None
-        for var in (self.mode_var, self.erase_var, self.verify_var, self.run_var, self.protect_var,
-                    self.swdelay_var, self.settle_var):
+        self.setting_vars = {"mode": self.mode_var, "verify": self.verify_var, "run": self.run_var,
+                             "settle": self.settle_var, "erase": self.erase_var, "protect": self.protect_var,
+                             "swdelay": self.swdelay_var, "speed": self.speed_var}
+        for var in self.setting_vars.values():
             var.trace_add("write", lambda *a: self._update_settings_state())
 
     def _build_status_card(self, parent):
@@ -604,15 +772,26 @@ class App(tk.Tk):
     def _build_tools_card(self, parent):
         card = self._card(parent, "Target tools")
         card.pack(fill="both", expand=True)
-        b = card.body
-        items = [("Detect chip", self.detect, "TButton"), ("Reset target", self.reset_target, "TButton"),
-                 ("Chip table…", self.chips_dialog, "TButton"), ("Erase chip", self.erase_chip, "TButton"),
-                 ("Unlock (remove RDP)", self.unlock, "TButton")]
-        for i, (txt, fn, style) in enumerate(items):
-            self._track(ttk.Button(b, text=txt, command=fn, style=style)).grid(
-                row=i // 3, column=i % 3, sticky="ew", padx=3, pady=3)
+        self.tools_body = card.body
         for c in range(3):
-            b.columnconfigure(c, weight=1)
+            self.tools_body.columnconfigure(c, weight=1)
+
+    def _build_tool_buttons(self):
+        for btn in self.tool_btns:
+            self.conn_widgets.remove(btn)
+            btn.destroy()
+        if self.family == "mm32":
+            items = [("Detect chip", self.detect), ("Reset target", self.reset_target),
+                     ("Chip table…", self.chips_dialog), ("Erase chip", self.erase_chip),
+                     ("Unlock (remove RDP)", self.unlock)]
+        else:
+            items = [("Detect chip", self.detect), ("Reset & run target", self.reset_target),
+                     ("Erase chip", self.erase_chip)]
+        self.tool_btns = []
+        for i, (txt, fn) in enumerate(items):
+            btn = self._track(ttk.Button(self.tools_body, text=txt, command=fn))
+            btn.grid(row=i // 3, column=i % 3, sticky="ew", padx=3, pady=3)
+            self.tool_btns.append(btn)
 
     def _build_log(self, parent):
         card = self._card(parent, "Activity log")
@@ -704,8 +883,75 @@ class App(tk.Tk):
                     w.state(["!disabled"] if on else ["disabled"])
             except tk.TclError:
                 pass
+        for btn in self.family_btns:
+            btn.state(["disabled"] if self.device_busy else ["!disabled"])
         self._update_upload_button()
         self._update_settings_state()
+
+    # ================================================================ chip family
+    def pick_family(self):
+        """The user picked a family: switch the programmer (if connected), then the UI."""
+        fam = self.family_var.get()
+        if fam == self.family:
+            return
+        if not self.link.is_open:
+            self._show_family(fam)
+            return
+        if self.busy or self.device_busy:
+            self.family_var.set(self.family)
+            return
+
+        def work():
+            try:
+                self.link.request(f"SET family {fam}")
+            except Exception:
+                self.call(self.family_var.set, self.family)
+                raise
+            self.ui_q.put(("log", (f"Chip family set to {FAMILIES[fam]['name']}", "ok")))
+            self._read_device()
+        self.run_bg("Chip family", work)
+
+    def _show_family(self, fam):
+        """Show the widgets, settings and file of a family."""
+        self.family = fam
+        self.family_var.set(fam)
+        self.prefs["family"] = fam
+        save_prefs(self.prefs)
+        f = FAMILIES[fam]
+        self.header_sub.configure(text=f"{f['name']}  ·  {f['iface']} production flasher  ·  ESP8266")
+        mm32 = fam == "mm32"
+        if mm32:
+            self.opt_row.pack_forget()
+            self.crc_lbl.pack_forget()
+            self.target_box.pack(side="left")
+            self.img_lbl.configure(text="Intel HEX (.hex) or binary (.bin) from Keil")
+        else:
+            self.opt_row.pack(fill="x", pady=(0, 8), before=self.upload_row)
+            self.target_box.pack_forget()
+            self.crc_lbl.pack(side="left")
+            self.img_lbl.configure(text="Intel HEX (.hex) from Keil (C51)")
+        for key, widgets in self.family_rows.items():
+            for w in widgets:
+                if key == fam:
+                    w.grid()
+                else:
+                    w.grid_remove()
+        if mm32:
+            self.protect_chk.pack(side="left", padx=(0, 16))
+        else:
+            self.protect_chk.pack_forget()
+        self.verify_chk.configure(text="Verify" if mm32 else "Verify (chip CRC)")
+        self._build_tool_buttons()
+
+        # The selected file belongs to a family; load this family's last one.
+        self.image = None
+        self.path_var.set("No file selected")
+        last = self.prefs["files"].get(fam)
+        if last and os.path.exists(last):
+            self._load_file(last, quiet=True)
+        self._update_crc()
+        self._update_match()
+        self._update_enabled()
 
     # ================================================================ connection
     def refresh_ports(self):
@@ -756,10 +1002,18 @@ class App(tk.Tk):
             self.call(self._connect_failed)
             raise LinkError("the programmer did not answer. Check the COM port and baud rate "
                             "(the firmware uses 460800).")
-        info = parse_kv(self.link.request("INFO"))
-        chips = parse_chips(self.link.request("CHIPS"))
+        if not ver.startswith("FLASHER "):
+            self.call(self._connect_failed)
+            raise LinkError(f"the programmer runs old firmware ({ver}). Upload the current firmware "
+                            f"with PlatformIO first.")
         self.ui_q.put(("log", (f"Connected to {ver}", "ok")))
         self.call(self._set_connected, True)
+        self._read_device()
+
+    def _read_device(self):
+        """(worker) Read INFO (and the MM32 chip table) and show it."""
+        info = parse_kv(self.link.request("INFO"))
+        chips = parse_chips(self.link.request("CHIPS")) if info.get("family") == "mm32" else None
         self.call(self._apply_device_info, info, chips)
 
     def _connect_failed(self):
@@ -767,11 +1021,7 @@ class App(tk.Tk):
         self._set_connected(False)
 
     def refresh_device(self):
-        def work():
-            info = parse_kv(self.link.request("INFO"))
-            chips = parse_chips(self.link.request("CHIPS"))
-            self.call(self._apply_device_info, info, chips)
-        self.run_bg("Refresh", work, quiet=True)
+        self.run_bg("Refresh", self._read_device, quiet=True)
 
     def _set_connected(self, on):
         self.conn_btn.state(["!disabled"])
@@ -804,33 +1054,37 @@ class App(tk.Tk):
             self.conn_btn.configure(style="Pulse.TButton" if self.pulse_on else "Accent.TButton")
         self.after(700, self._pulse)
 
-    def _apply_device_info(self, info, chips):
+    def _apply_device_info(self, info, chips=None):
+        fam = info.get("family", self.family)
+        if fam in FAMILIES and fam != self.family:
+            self._show_family(fam)  # the programmer decides; it may have been switched from the web UI
         self.dev_info = info
-        self.chips = chips
-        names = ["ANY"] + [c["name"] for c in chips]
-        self.target_cb["values"] = names
-        if self.target_var.get() not in names:
-            self.target_var.set("ANY")
+        if chips is not None:
+            self.chips = chips
+            names = ["ANY"] + [c["name"] for c in chips]
+            self.target_cb["values"] = names
+            if self.target_var.get() not in names:
+                self.target_var.set("ANY")
 
         if info.get("img") == "1":
             name = info.get("name", "-")
+            size = f"{int(info.get('size', 0)):,} bytes"
+            if self.family == "mm32":
+                what = f"{size} @ {info.get('base')}   ·   CRC {info.get('crc')}   ·   for {info.get('target')}"
+                log = f"{size}, CRC {info.get('crc')}, for {info.get('target')}"
+            else:
+                what = f"{size}   ·   options {info.get('opt')}   ·   chip CRC {info.get('chipcrc')}"
+                log = f"{size}, options {info.get('opt')}, chip CRC {info.get('chipcrc')}"
             self.dev_name.configure(text=name if name != "-" else "(unnamed image)")
-            self.dev_detail.configure(
-                text=f"{int(info.get('size', 0)):,} bytes @ {info.get('base')}   ·   CRC {info.get('crc')}   ·   "
-                     f"for {info.get('target')}   ·   fw {info.get('fw')}")
-            self.write_log(f"Programmer holds {name} ({int(info.get('size', 0)):,} bytes, CRC {info.get('crc')}, "
-                           f"for {info.get('target')})")
+            self.dev_detail.configure(text=f"{what}   ·   fw {info.get('fw')}")
+            self.write_log(f"Programmer holds {name} for {FAMILIES[self.family]['name']} ({log})")
         else:
             self.dev_name.configure(text="No firmware stored")
-            self.dev_detail.configure(text="Load a .hex file below and upload it to the programmer.")
+            self.dev_detail.configure(text=f"No {FAMILIES[self.family]['name']} image yet. Load a .hex file below "
+                                           f"and upload it to the programmer.")
 
         if "mode" in info:
-            self._saved_settings = {
-                "mode": info.get("mode", "button"), "erase": info.get("erase", "chip"),
-                "verify": info.get("verify", "1"), "run": info.get("run", "1"),
-                "protect": info.get("protect", "0"), "swdelay": info.get("swdelay", "0"),
-                "settle": info.get("settle", "500"),
-            }
+            self._saved_settings = {k: info.get(k, SETTING_DEFAULTS[k]) for k in self._setting_keys()}
             self._show_settings(self._saved_settings)
         self._set_counts(int(info.get("pass", 0)), int(info.get("fail", 0)))
         self._update_match()
@@ -848,26 +1102,40 @@ class App(tk.Tk):
         except ValueError:
             return None
 
+    def _same_data(self):
+        return bool(self.image) and self._stored_crc() == self.image[3]
+
+    def _same_opt(self):
+        """Fortior: the stored option bytes equal the ones entered. Always true for MM32."""
+        if self.family != "fortior":
+            return True
+        opt = self._opt_bytes()
+        return opt is not None and self.dev_info.get("opt", "").upper() == opt.hex().upper()
+
     def _update_match(self):
-        stored = self._stored_crc()
-        if not self.link.is_open or not self.image or stored is None:
+        if not self.link.is_open or not self.image or self._stored_crc() is None:
             self.match_lbl.configure(text="", bg=C["card"])
-        elif stored == self.image[3]:
+        elif self._same_data() and self._same_opt():
             self.match_lbl.configure(text="✓  Same as the file selected below", bg=C["ok_soft"], fg=C["ok_text"])
+        elif self._same_data():
+            self.match_lbl.configure(text="⚠  Same file, but different option bytes — press Apply options",
+                                     bg=C["warn_soft"], fg=C["warn"])
         else:
             self.match_lbl.configure(text="⚠  Different from the file selected below — upload to replace it",
                                      bg=C["warn_soft"], fg=C["warn"])
         self._update_upload_button()
 
     def _update_upload_button(self):
-        stored = self._stored_crc()
-        same = self.image and stored == self.image[3]
-        if same:
+        if self._same_data() and self._same_opt():
             self.upload_btn.configure(text="Upload again", style="TButton")
+        elif self._same_data():
+            self.upload_btn.configure(text="Apply options", style="Accent.TButton")
         else:
             self.upload_btn.configure(text="Upload to programmer", style="Accent.TButton")
-        if not self.image:
+        if not self.image or (self.family == "fortior" and self._opt_bytes() is None):
             self.upload_btn.state(["disabled"])
+        elif self.link.is_open and not self.device_busy:
+            self.upload_btn.state(["!disabled"])
 
     # ================================================================ image
     def browse(self):
@@ -880,19 +1148,24 @@ class App(tk.Tk):
 
     def _load_file(self, path, quiet=False):
         try:
-            base, data = load_image(path)
+            base, data = load_image(path, self.family)
         except Exception as e:
             if not quiet:
-                messagebox.showerror(APP_TITLE, f"Cannot load image:\n{e}")
+                messagebox.showerror(APP_TITLE, f"Cannot load image for {FAMILIES[self.family]['name']}:\n{e}")
             return
         crc = zlib.crc32(data)
         self.image = (path, base, data, crc)
         self.path_var.set(os.path.basename(path))
-        self.img_lbl.configure(text=f"{len(data):,} bytes   ·   0x{base:08X} – 0x{base + len(data) - 1:08X}   ·   "
-                                    f"CRC 0x{crc:08X}   ·   {os.path.dirname(path)}")
-        self.prefs["last_file"] = path
+        if self.family == "mm32":
+            span = f"0x{base:08X} – 0x{base + len(data) - 1:08X}"
+        else:
+            span = f"0x0000 – 0x{len(data) - 1:04X}"
+        self.img_lbl.configure(text=f"{len(data):,} bytes   ·   {span}   ·   CRC 0x{crc:08X}   ·   "
+                                    f"{os.path.dirname(path)}")
+        self.prefs["files"][self.family] = path
         save_prefs(self.prefs)
-        self.write_log(f"Selected {os.path.basename(path)} ({len(data):,} bytes @ 0x{base:08X})")
+        self.write_log(f"Selected {os.path.basename(path)} ({len(data):,} bytes, {span})")
+        self._update_crc()
         self._update_match()
         self._update_enabled()
 
@@ -900,20 +1173,42 @@ class App(tk.Tk):
         if not self.image:
             messagebox.showwarning(APP_TITLE, "Select a firmware file first.")
             return
-        path, base, data, crc = self.image
-        target = self.target_var.get() or "ANY"
-        chip = next((c for c in self.chips if c["name"] == target), None)
-        if chip and base + len(data) > FLASH_BASE + chip["kb"] * 1024:
-            messagebox.showerror(APP_TITLE, f"Image ({len(data):,} bytes) does not fit {target} ({chip['kb']} KB).")
+        if self.dev_info.get("family") != self.family:
+            messagebox.showerror(APP_TITLE, "The programmer is set to another chip family. Press Refresh.")
             return
-        self.prefs["target"] = target
+        path, base, data, crc = self.image
+        if self.family == "mm32":
+            target = self.target_var.get() or "ANY"
+            chip = next((c for c in self.chips if c["name"] == target), None)
+            if chip and base + len(data) > FLASH_BASE + chip["kb"] * 1024:
+                messagebox.showerror(APP_TITLE,
+                                     f"Image ({len(data):,} bytes) does not fit {target} ({chip['kb']} KB).")
+                return
+            self.prefs["target"] = target
+            fields = f"0x{base:08X} {target}"
+        else:
+            opt = self._opt_bytes()
+            if opt is None:
+                messagebox.showerror(APP_TITLE, "Option bytes must be 8 hex digits, e.g. 00F000FF.")
+                return
+            fields = opt.hex().upper()
+            self.prefs["opt"] = fields
+            if self._same_data() and not self._same_opt():
+                def work():
+                    info = self.link.request(f"OPT {fields}")
+                    self.ui_q.put(("log", (f"Option bytes set to {fields}", "ok")))
+                    self.call(self._apply_device_info, parse_kv(info))
+                save_prefs(self.prefs)
+                self.run_bg("Apply options", work)
+                return
         save_prefs(self.prefs)
-        self.run_bg("Upload", self._upload_worker, path, base, data, target)
+        self.run_bg("Upload", self._upload_worker, path, data, fields)
 
-    def _upload_worker(self, path, base, data, target):
+    def _upload_worker(self, path, data, fields):
+        """fields: the family part of BEGIN (MM32 "<base> <target>", Fortior "<option bytes>")."""
         name = os.path.basename(path).replace(" ", "_")[:40]
         crc = zlib.crc32(data)
-        self.link.request(f"BEGIN {len(data)} 0x{crc:08X} 0x{base:08X} {target} {name}")
+        self.link.request(f"BEGIN {len(data)} 0x{crc:08X} {fields} {name}")
         t0 = time.time()
         try:
             for off in range(0, len(data), CHUNK):
@@ -927,33 +1222,35 @@ class App(tk.Tk):
                 pass
             raise
         self.ui_q.put(("log", (f"Uploaded {name}: {len(data):,} bytes in {time.time() - t0:.1f}s, "
-                               f"CRC 0x{crc:08X} verified", "ok")))
+                               f"CRC 0x{crc:08X} verified ({fields})", "ok")))
         self.call(self._apply_device_info, parse_kv(info), self.chips)
 
     # ================================================================ settings
+    def _setting_keys(self):
+        return COMMON_SETTINGS + FAMILIES[self.family]["settings"]
+
     def _current_settings(self):
-        def num(var, default):
-            try:
-                return str(int(var.get()))
-            except ValueError:
-                return default
-        return {
-            "mode": self.mode_var.get(), "erase": self.erase_var.get(),
-            "verify": str(int(self.verify_var.get())), "run": str(int(self.run_var.get())),
-            "protect": str(int(self.protect_var.get())),
-            "swdelay": num(self.swdelay_var, "0"), "settle": num(self.settle_var, "500"),
-        }
+        """The active family's settings as shown, in the programmer's text form."""
+        out = {}
+        for key in self._setting_keys():
+            var = self.setting_vars[key]
+            if isinstance(var, tk.BooleanVar):
+                out[key] = str(int(var.get()))
+            elif key in ("mode", "erase"):
+                out[key] = var.get()
+            else:
+                try:
+                    out[key] = str(int(var.get()))
+                except ValueError:
+                    out[key] = SETTING_DEFAULTS[key]
+        return out
 
     def _show_settings(self, st):
         self.suppress_set = True
         try:
-            self.mode_var.set(st["mode"])
-            self.erase_var.set(st["erase"])
-            self.verify_var.set(st["verify"] == "1")
-            self.run_var.set(st["run"] == "1")
-            self.protect_var.set(st["protect"] == "1")
-            self.swdelay_var.set(st["swdelay"])
-            self.settle_var.set(st["settle"])
+            for key, value in st.items():
+                var = self.setting_vars[key]
+                var.set(value == "1" if isinstance(var, tk.BooleanVar) else value)
         finally:
             self.suppress_set = False
         self._update_settings_state()
@@ -1016,6 +1313,11 @@ class App(tk.Tk):
     def detect(self):
         def work():
             info = parse_kv(self.link.request("DETECT", timeout=10))
+            if "devid" not in info:  # Fortior
+                msg = f"{info.get('chip')}  ·  ID {info.get('id')}  ·  FICE timing {info.get('speed')}%"
+                self.ui_q.put(("log", (f"Detected {msg}", "ok")))
+                self.call(self._set_banner, "Chip detected", msg, "ok")
+                return
             self.last_detect = info
             msg = (f"{info.get('chip')}  ·  DEV_ID {info.get('devid')}  ·  {info.get('flash')} KB flash  ·  "
                    f"read-protected: {'yes' if info.get('protected') == '1' else 'no'}  ·  "
@@ -1031,11 +1333,14 @@ class App(tk.Tk):
     def reset_target(self):
         def work():
             self.link.request("RESET", timeout=10)
-            self.ui_q.put(("log", ("Target reset", "ok")))
+            self.ui_q.put(("log", ("Target reset" if self.family == "mm32" else
+                                   "Target reset and released — the firmware runs", "ok")))
         self.run_bg("Reset", work)
 
     def erase_chip(self):
-        if messagebox.askyesno(APP_TITLE, "Mass-erase the connected target?"):
+        question = ("Mass-erase the connected target?" if self.family == "mm32" else
+                    "Erase the whole flash of the connected target?")
+        if messagebox.askyesno(APP_TITLE, question):
             def work():
                 self.link.request("ERASE", timeout=15)
                 self.ui_q.put(("log", ("Target erased", "ok")))
@@ -1050,7 +1355,7 @@ class App(tk.Tk):
             self.run_bg("Unlock", work)
 
     def send_raw(self):
-        """Send a raw protocol command (e.g. 'READ 0x08000000 16') and log the reply."""
+        """Send a raw protocol command (e.g. 'READ 0x08000000 16', 'FICE A P D15 S3 R X') and log the reply."""
         cmd = self.cmd_var.get().strip()
         if not cmd:
             return
@@ -1188,7 +1493,8 @@ class App(tk.Tk):
             self._set_device_busy(True)
             if st == "connect":
                 self.prog["value"] = 0
-            self._set_banner(self.STATE_TEXT.get(st, st) + "…", "", "busy")
+            text = "Verifying (CRC)" if st == "verify" and self.family == "fortior" else self.STATE_TEXT.get(st, st)
+            self._set_banner(text + "…", "", "busy")
         elif ev == "PROGRESS":
             self.prog["value"] = int(parts[3])
             self.result_lbl.configure(text=f"{parts[2].capitalize()}  {parts[3]}%")
@@ -1204,6 +1510,10 @@ class App(tk.Tk):
                 self._set_banner("Waiting for board", "Place the next board on the fixture.", "idle")
         elif ev == "RESULT":
             self._on_result(line)
+        elif ev == "FAMILY":
+            self.write_log(f"Chip family is now {FAMILIES.get(parts[2], {}).get('name', parts[2])}", "dim")
+            if self.link.is_open:
+                self.refresh_device()
         elif ev == "BOOT":
             self.write_log("Programmer restarted", "dim")
             if self.link.is_open:
@@ -1224,13 +1534,13 @@ class App(tk.Tk):
             msg = f"{chip} programmed and verified in {int(ms) / 1000:.2f} s"
             self._set_banner("✓  PASS", msg, "ok")
             self.write_log(f"PASS  {msg}", "ok")
-            self._csv(["PASS", chip, devid, ms, "", img])
+            self._csv(["PASS", self.family, chip, devid, ms, "", img])
         else:
             counted = parts[3] == "1"
             reason = " ".join(parts[4:])
             self._set_banner("✕  FAIL", reason + ("" if counted else "   (not counted)"), "err")
             self.write_log(f"FAIL  {reason}" + ("" if counted else "  (not counted)"), "err")
-            self._csv(["FAIL" if counted else "NO-TARGET", "", "", "", reason, img])
+            self._csv(["FAIL" if counted else "NO-TARGET", self.family, "", "", "", reason, img])
             m = re.search(r"Unknown chip ID (0x[0-9A-Fa-f]{8})", reason)
             if m:
                 self.after(100, self._ask_identify, m.group(1))
@@ -1304,7 +1614,7 @@ class App(tk.Tk):
             with open(LOG_CSV, "a", newline="") as f:
                 w = csv.writer(f)
                 if new:
-                    w.writerow(["timestamp", "result", "chip", "dev_id", "ms", "message", "image"])
+                    w.writerow(["timestamp", "result", "family", "chip", "chip_id", "ms", "message", "image"])
                 w.writerow([dt.datetime.now().isoformat(timespec="seconds")] + row)
         except OSError as e:
             self.write_log(f"Cannot write {LOG_CSV}: {e}", "err")
