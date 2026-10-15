@@ -170,8 +170,23 @@ static bool waitHalted() {
 // ---------------------------------------------------------------- operations
 
 bool probe() {
+  // Same speed fallback as attach(): some boards only answer with a slower SWD clock.
+  // Start with the speed that worked last time so a present board is seen in one try.
+  static uint32_t lastGood = 0;
+  const uint32_t base = swd::getDelay();
+  const uint32_t tries[] = {max(base, lastGood), base, 4, 16, 64};
   uint32_t id;
-  bool ok = swd::connect(&id, false);
+  bool ok = false;
+  for (uint32_t d : tries) {
+    if (d < base) continue;
+    swd::setDelay(d);
+    if (swd::connect(&id, false)) {
+      ok = true;
+      lastGood = d;
+      break;
+    }
+  }
+  swd::setDelay(base);
   swd::release();
   return ok;
 }

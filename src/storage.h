@@ -25,7 +25,7 @@ struct Config {
   bool verify = true;
   bool protect = false;  // enable read-out protection after programming
   bool run = true;       // reset target and run after programming
-  uint32_t swdDelay = 0;
+  uint32_t swdDelay = 4;  // 0 is too fast for some boards; attach/probe slow down further if needed
   uint32_t settleMs = 500;  // auto mode: wait after target detected
 };
 

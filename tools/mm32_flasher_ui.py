@@ -207,11 +207,18 @@ def parse_chips(text):
 PREFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_prefs.json")
 
 C = {
-    "bg": "#eef1f6", "card": "#ffffff", "border": "#dde3eb", "text": "#1e293b", "muted": "#64748b",
-    "accent": "#2563eb", "accent_hover": "#1d4ed8", "accent_glow": "#60a5fa", "accent_soft": "#dbeafe",
-    "ok": "#16a34a", "ok_soft": "#dcfce7", "err": "#dc2626", "err_soft": "#fee2e2",
-    "warn": "#b45309", "warn_soft": "#fef3c7", "idle_soft": "#f1f5f9",
-    "header": "#0f172a", "header_text": "#e2e8f0", "header_muted": "#94a3b8", "disabled": "#cbd5e1",
+    # dark theme (slate)
+    "bg": "#0e131b", "card": "#161d28", "border": "#273244", "text": "#e6eaf0", "muted": "#8c99ad",
+    "accent": "#3b82f6", "accent_hover": "#2563eb", "accent_glow": "#60a5fa", "accent_soft": "#172a46",
+    "accent_text": "#93c5fd",
+    "ok": "#22c55e", "ok_hover": "#16a34a", "ok_soft": "#0f2a1d", "ok_text": "#4ade80",
+    "err": "#ef4444", "err_hover": "#dc2626", "err_soft": "#341719", "err_text": "#f87171",
+    "warn": "#fbbf24", "warn_soft": "#33280e", "idle_soft": "#1c2433",
+    "header": "#090d13", "header_text": "#e6eaf0", "header_muted": "#7c899c", "disabled": "#4b5567",
+    "btn": "#263142", "btn_hover": "#303d52", "btn_pressed": "#3a4962", "btn_border": "#3d4c64",
+    "btn_dis": "#1b2230", "btn_dis_border": "#262f3f", "btn_dis_text": "#5d6a7d", "acc_dis": "#2a3446",
+    "field": "#0f1520", "field_border": "#334155", "log_bg": "#0f1520", "log_time": "#5d6a7d",
+    "pill_on_bg": "#0f2a1d", "pill_on_fg": "#4ade80", "pill_off_bg": "#341719", "pill_off_fg": "#fca5a5",
 }
 FONT = "Segoe UI"
 MONO = "Consolas"
@@ -281,63 +288,96 @@ class App(tk.Tk):
         base = (FONT, 10)
         s.configure(".", font=base, background=C["bg"], foreground=C["text"], bordercolor=C["border"],
                     lightcolor=C["border"], darkcolor=C["border"], troughcolor=C["idle_soft"],
-                    focuscolor=C["accent_soft"])
+                    focuscolor=C["accent"], selectbackground=C["accent"], selectforeground="#ffffff",
+                    fieldbackground=C["field"], insertcolor=C["text"], arrowcolor=C["text"])
         s.configure("TFrame", background=C["bg"])
         s.configure("Card.TFrame", background=C["card"])
         s.configure("Header.TFrame", background=C["header"])
-        s.configure("TLabel", background=C["bg"])
+        s.configure("TLabel", background=C["bg"], foreground=C["text"])
         s.configure("Card.TLabel", background=C["card"])
         s.configure("Muted.TLabel", background=C["card"], foreground=C["muted"], font=(FONT, 9))
         s.configure("CardTitle.TLabel", background=C["card"], font=(FONT, 11, "bold"))
-        s.configure("Step.TLabel", background=C["accent_soft"], foreground=C["accent"], font=(FONT, 9, "bold"),
-                    padding=(7, 1))
+        s.configure("Step.TLabel", background=C["accent_soft"], foreground=C["accent_text"],
+                    font=(FONT, 9, "bold"), padding=(7, 1))
         s.configure("FileName.TLabel", background=C["card"], font=(FONT, 15, "bold"))
         s.configure("Header.TLabel", background=C["header"], foreground=C["header_text"])
         s.configure("HeaderTitle.TLabel", background=C["header"], foreground="#ffffff", font=(FONT, 15, "bold"))
         s.configure("HeaderSub.TLabel", background=C["header"], foreground=C["header_muted"], font=(FONT, 9))
 
-        s.configure("TButton", padding=(12, 6), background="#f8fafc", relief="flat")
-        s.map("TButton", background=[("disabled", "#f1f5f9"), ("pressed", "#e2e8f0"), ("active", "#eef2f7")],
-              foreground=[("disabled", C["disabled"])])
+        def button(style, bg, hover, pressed, border, fg, dis_bg, dis_fg, dis_border, **extra):
+            s.configure(style, background=bg, foreground=fg, bordercolor=border, lightcolor=bg, darkcolor=bg,
+                        relief="flat", **extra)
+            fills = [("disabled", dis_bg), ("pressed", pressed), ("active", hover)]
+            s.map(style, background=fills, lightcolor=fills, darkcolor=fills,
+                  bordercolor=[("disabled", dis_border), ("active", hover if border == bg else C["accent"])],
+                  foreground=[("disabled", dis_fg)])
+
+        # Secondary buttons: slate fill with a visible border.
+        button("TButton", C["btn"], C["btn_hover"], C["btn_pressed"], C["btn_border"], C["text"],
+               C["btn_dis"], C["btn_dis_text"], C["btn_dis_border"], padding=(12, 6), font=(FONT, 10, "bold"))
         for name, bg, hover in (("Accent", C["accent"], C["accent_hover"]),
                                 ("Pulse", C["accent_glow"], C["accent"]),
-                                ("Ok", C["ok"], "#15803d"),
-                                ("Danger", C["err"], "#b91c1c")):
-            s.configure(f"{name}.TButton", background=bg, foreground="#ffffff", bordercolor=bg,
-                        lightcolor=bg, darkcolor=bg, font=(FONT, 10, "bold"), padding=(16, 7))
-            s.map(f"{name}.TButton", background=[("disabled", C["disabled"]), ("pressed", hover), ("active", hover)],
-                  foreground=[("disabled", "#f8fafc")])
-        s.configure("Flash.TButton", background=C["accent"], foreground="#ffffff", bordercolor=C["accent"],
-                    lightcolor=C["accent"], darkcolor=C["accent"], font=(FONT, 16, "bold"), padding=(20, 14))
-        s.map("Flash.TButton", background=[("disabled", C["disabled"]), ("pressed", C["accent_hover"]),
-                                           ("active", C["accent_hover"])],
-              foreground=[("disabled", "#f8fafc")])
-        s.configure("Link.TButton", background=C["card"], foreground=C["accent"], padding=(4, 2),
-                    bordercolor=C["card"], lightcolor=C["card"], darkcolor=C["card"], font=(FONT, 9, "underline"))
-        s.map("Link.TButton", background=[("active", C["card"])], foreground=[("disabled", C["disabled"])])
+                                ("Ok", C["ok"], C["ok_hover"]),
+                                ("Danger", C["err"], C["err_hover"])):
+            button(f"{name}.TButton", bg, hover, hover, bg, "#ffffff", C["acc_dis"], C["btn_dis_text"],
+                   C["acc_dis"], padding=(16, 7), font=(FONT, 10, "bold"))
+        button("Flash.TButton", C["accent"], C["accent_hover"], C["accent_hover"], C["accent"], "#ffffff",
+               C["acc_dis"], C["btn_dis_text"], C["acc_dis"], padding=(20, 14), font=(FONT, 16, "bold"))
+        button("Header.TButton", C["btn"], C["btn_hover"], C["btn_pressed"], C["btn_border"], "#ffffff",
+               C["header"], C["btn_dis_text"], C["btn_dis_border"], padding=(6, 1), font=(FONT, 12, "bold"))
+        s.configure("Link.TButton", background=C["card"], foreground=C["accent_text"], padding=(4, 2),
+                    bordercolor=C["card"], lightcolor=C["card"], darkcolor=C["card"], relief="flat",
+                    font=(FONT, 9, "underline"))
+        s.map("Link.TButton", background=[("active", C["accent_soft"])],
+              lightcolor=[("active", C["accent_soft"])], darkcolor=[("active", C["accent_soft"])],
+              bordercolor=[("active", C["accent_soft"])], foreground=[("disabled", C["btn_dis_text"])])
 
-        s.configure("Header.TButton", background="#1e293b", foreground="#ffffff", bordercolor="#334155",
-                    lightcolor="#1e293b", darkcolor="#1e293b", font=(FONT, 12, "bold"), padding=(6, 1))
-        s.map("Header.TButton", background=[("disabled", "#1e293b"), ("active", "#334155")],
-              foreground=[("disabled", "#475569")])
-        s.configure("Card.TCheckbutton", background=C["card"])
-        s.map("Card.TCheckbutton", background=[("active", C["card"])])
-        s.configure("Card.TRadiobutton", background=C["card"])
-        s.map("Card.TRadiobutton", background=[("active", C["card"])])
-        s.configure("Seg.Toolbutton", background="#f1f5f9", foreground=C["text"], padding=(14, 5),
-                    font=(FONT, 9, "bold"), anchor="center")
-        s.map("Seg.Toolbutton", background=[("disabled", "#f8fafc"), ("selected", C["accent"]), ("active", "#e2e8f0")],
-              foreground=[("disabled", C["disabled"]), ("selected", "#ffffff")])
-        s.configure("TCombobox", padding=4, arrowsize=14)
-        s.configure("Header.TCombobox", fieldbackground="#1e293b", background="#1e293b",
-                    foreground="#ffffff", arrowcolor="#ffffff", bordercolor="#334155")
-        s.map("Header.TCombobox", fieldbackground=[("readonly", "#1e293b"), ("disabled", "#1e293b")],
-              foreground=[("readonly", "#ffffff"), ("disabled", C["header_muted"])],
-              selectbackground=[("readonly", "#1e293b")], selectforeground=[("readonly", "#ffffff")])
+        for style in ("Card.TCheckbutton", "Card.TRadiobutton"):
+            s.configure(style, background=C["card"], foreground=C["text"], indicatorbackground=C["field"],
+                        indicatorforeground=C["accent_text"], upperbordercolor=C["field_border"],
+                        lowerbordercolor=C["field_border"])
+            s.map(style, background=[("active", C["card"])],
+                  indicatorbackground=[("disabled", C["btn_dis"]), ("pressed", C["btn"])],
+                  foreground=[("disabled", C["btn_dis_text"])])
+        s.configure("Seg.Toolbutton", background=C["btn"], foreground=C["text"], padding=(14, 5),
+                    font=(FONT, 9, "bold"), anchor="center", bordercolor=C["btn_border"], relief="flat",
+                    lightcolor=C["btn"], darkcolor=C["btn"])
+        seg = [("disabled", C["btn_dis"]), ("selected", C["accent"]), ("active", C["btn_hover"])]
+        s.map("Seg.Toolbutton", background=seg, lightcolor=seg, darkcolor=seg,
+              bordercolor=[("disabled", C["btn_dis_border"]), ("selected", C["accent"])],
+              foreground=[("disabled", C["btn_dis_text"]), ("selected", "#ffffff")])
+
+        for style in ("TCombobox", "Header.TCombobox"):
+            s.configure(style, padding=4, arrowsize=14, fieldbackground=C["field"], background=C["btn"],
+                        foreground=C["text"], arrowcolor=C["text"], bordercolor=C["field_border"],
+                        lightcolor=C["field"], darkcolor=C["field"])
+            s.map(style, fieldbackground=[("readonly", C["field"]), ("disabled", C["btn_dis"])],
+                  background=[("active", C["btn_hover"]), ("disabled", C["btn_dis"])],
+                  foreground=[("disabled", C["btn_dis_text"]), ("readonly", C["text"])],
+                  arrowcolor=[("disabled", C["btn_dis_text"])],
+                  selectbackground=[("readonly", C["field"])], selectforeground=[("readonly", C["text"])])
         self.option_add("*TCombobox*Listbox.font", base)
-        s.configure("TSpinbox", padding=3, arrowsize=12)
-        s.configure("Horizontal.TProgressbar", thickness=10, background=C["accent"], bordercolor=C["idle_soft"],
-                    lightcolor=C["accent"], darkcolor=C["accent"])
+        self.option_add("*TCombobox*Listbox.background", C["field"])
+        self.option_add("*TCombobox*Listbox.foreground", C["text"])
+        self.option_add("*TCombobox*Listbox.selectBackground", C["accent"])
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        for style in ("TEntry", "TSpinbox"):
+            s.configure(style, fieldbackground=C["field"], foreground=C["text"], bordercolor=C["field_border"],
+                        lightcolor=C["field"], darkcolor=C["field"], insertcolor=C["text"], padding=3,
+                        arrowsize=12, background=C["btn"], arrowcolor=C["text"])
+            s.map(style, fieldbackground=[("disabled", C["btn_dis"])], foreground=[("disabled", C["btn_dis_text"])],
+                  bordercolor=[("focus", C["accent"])], arrowcolor=[("disabled", C["btn_dis_text"])])
+        s.configure("Vertical.TScrollbar", background=C["btn"], troughcolor=C["log_bg"], bordercolor=C["log_bg"],
+                    lightcolor=C["btn"], darkcolor=C["btn"], arrowcolor=C["muted"])
+        s.map("Vertical.TScrollbar", background=[("active", C["btn_hover"])])
+        s.configure("Treeview", background=C["field"], fieldbackground=C["field"], foreground=C["text"],
+                    bordercolor=C["border"], rowheight=24)
+        s.map("Treeview", background=[("selected", C["accent"])], foreground=[("selected", "#ffffff")])
+        s.configure("Treeview.Heading", background=C["btn"], foreground=C["text"], relief="flat",
+                    font=(FONT, 9, "bold"), lightcolor=C["btn"], darkcolor=C["btn"], bordercolor=C["border"])
+        s.map("Treeview.Heading", background=[("active", C["btn_hover"])])
+        s.configure("Horizontal.TProgressbar", thickness=10, background=C["accent"], troughcolor=C["idle_soft"],
+                    bordercolor=C["idle_soft"], lightcolor=C["accent"], darkcolor=C["accent"])
         s.configure("Ok.Horizontal.TProgressbar", background=C["ok"], lightcolor=C["ok"], darkcolor=C["ok"])
         s.configure("Err.Horizontal.TProgressbar", background=C["err"], lightcolor=C["err"], darkcolor=C["err"])
 
@@ -375,7 +415,7 @@ class App(tk.Tk):
 
         conn = ttk.Frame(header, style="Header.TFrame")
         conn.pack(side="right")
-        self.status_pill = tk.Label(conn, text="●  Disconnected", bg="#3f1d24", fg="#fca5a5",
+        self.status_pill = tk.Label(conn, text="●  Disconnected", bg=C["pill_off_bg"], fg=C["pill_off_fg"],
                                     font=(FONT, 9, "bold"), padx=10, pady=4)
         self.status_pill.pack(side="right", padx=(12, 0))
         self.conn_btn = ttk.Button(conn, text="Connect", style="Accent.TButton", command=self.toggle_connect,
@@ -397,7 +437,7 @@ class App(tk.Tk):
 
         # ---- hint banner (visible while disconnected)
         self.hint = tk.Frame(self, bg=C["accent_soft"])
-        tk.Label(self.hint, text="①", bg=C["accent_soft"], fg=C["accent"], font=(FONT, 14, "bold")).pack(
+        tk.Label(self.hint, text="①", bg=C["accent_soft"], fg=C["accent_text"], font=(FONT, 14, "bold")).pack(
             side="left", padx=(18, 8), pady=6)
         self.hint_lbl = tk.Label(self.hint, bg=C["accent_soft"], fg=C["text"], font=(FONT, 10),
                                  text="Plug in the programmer, choose its COM port (e.g. USB-SERIAL CH340) "
@@ -466,54 +506,59 @@ class App(tk.Tk):
         b = card.body
         b.columnconfigure(1, weight=1)
 
-        def seg(row, label, var, options):
-            ttk.Label(b, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=4)
+        def label(row, text):
+            ttk.Label(b, text=text, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
+
+        def seg(row, text, var, options):
+            label(row, text)
             f = ttk.Frame(b, style="Card.TFrame")
-            f.grid(row=row, column=1, sticky="w", pady=4)
-            for value, text in options:
-                self._track(ttk.Radiobutton(f, text=text, value=value, variable=var, style="Seg.Toolbutton")).pack(
-                    side="left")
+            f.grid(row=row, column=1, sticky="w", pady=3)
+            for value, opt in options:
+                self._track(ttk.Radiobutton(f, text=opt, value=value, variable=var, width=17,
+                                            style="Seg.Toolbutton")).pack(side="left")
 
         self.mode_var = tk.StringVar(value="button")
         self.erase_var = tk.StringVar(value="chip")
         seg(0, "Start flashing by", self.mode_var, [("button", "Button press"), ("auto", "Auto-detect board")])
         seg(1, "Erase", self.erase_var, [("chip", "Full chip"), ("pages", "Only image pages")])
 
+        label(2, "After programming")
         checks = ttk.Frame(b, style="Card.TFrame")
-        checks.grid(row=2, column=1, sticky="w", pady=(6, 2))
+        checks.grid(row=2, column=1, sticky="w", pady=3)
         self.verify_var = tk.BooleanVar(value=True)
         self.run_var = tk.BooleanVar(value=True)
         self.protect_var = tk.BooleanVar(value=False)
-        for text, var in (("Verify", self.verify_var), ("Run after flash", self.run_var),
-                          ("Read-protect (RDP)", self.protect_var)):
+        for text, var in (("Verify", self.verify_var), ("Run firmware", self.run_var),
+                          ("Read-protect", self.protect_var)):
             self._track(ttk.Checkbutton(checks, text=text, variable=var, style="Card.TCheckbutton")).pack(
-                side="left", padx=(0, 14))
+                side="left", padx=(0, 16))
 
-        nums = ttk.Frame(b, style="Card.TFrame")
-        nums.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        def number(row, text, var, hi, step, hint):
+            label(row, text)
+            f = ttk.Frame(b, style="Card.TFrame")
+            f.grid(row=row, column=1, sticky="w", pady=3)
+            self._track(ttk.Spinbox(f, from_=0, to=hi, increment=step, width=7, textvariable=var)).pack(side="left")
+            ttk.Label(f, text=hint, style="Muted.TLabel").pack(side="left", padx=(10, 0))
+
         self.swdelay_var = tk.StringVar(value="0")
         self.settle_var = tk.StringVar(value="500")
-        ttk.Label(nums, text="SWD delay", style="Card.TLabel").pack(side="left")
-        sp1 = self._track(ttk.Spinbox(nums, from_=0, to=250, width=5, textvariable=self.swdelay_var,
-                                      command=self._apply_numbers))
-        sp1.pack(side="left", padx=(6, 18))
-        ttk.Label(nums, text="Auto-detect settle (ms)", style="Card.TLabel").pack(side="left")
-        sp2 = self._track(ttk.Spinbox(nums, from_=0, to=10000, increment=100, width=7,
-                                      textvariable=self.settle_var, command=self._apply_numbers))
-        sp2.pack(side="left", padx=6)
-        for sp in (sp1, sp2):
-            sp.bind("<Return>", lambda e: self._apply_numbers())
-            sp.bind("<FocusOut>", lambda e: self._apply_numbers())
+        number(3, "SWD clock delay", self.swdelay_var, 250, 1, "0 = fastest; raise for long wires")
+        number(4, "Auto-detect settle", self.settle_var, 10000, 100, "ms to wait after a board is detected")
 
-        self.saved_lbl = ttk.Label(b, text="Changes are saved to the programmer automatically.",
-                                   style="Muted.TLabel")
-        self.saved_lbl.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        tk.Frame(b, bg=C["border"], height=1).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 6))
+        foot = ttk.Frame(b, style="Card.TFrame")
+        foot.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.saved_lbl = tk.Label(foot, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9, "bold"))
+        self.saved_lbl.pack(side="left")
+        self.save_btn = ttk.Button(foot, text="Save to programmer", style="Accent.TButton", command=self.save_settings)
+        self.save_btn.pack(side="right")
+        self.revert_btn = ttk.Button(foot, text="Undo changes", command=self.revert_settings)
+        self.revert_btn.pack(side="right", padx=(0, 8))
 
-        for key, var in (("mode", self.mode_var), ("erase", self.erase_var)):
-            var.trace_add("write", lambda *a, k=key, v=var: self._apply_setting(k, v.get()))
-        for key, var in (("verify", self.verify_var), ("run", self.run_var), ("protect", self.protect_var)):
-            var.trace_add("write", lambda *a, k=key, v=var: self._apply_setting(k, int(v.get())))
-        self.mode_var.trace_add("write", lambda *a: self._update_flash_hint())
+        self._saved_settings = None
+        for var in (self.mode_var, self.erase_var, self.verify_var, self.run_var, self.protect_var,
+                    self.swdelay_var, self.settle_var):
+            var.trace_add("write", lambda *a: self._update_settings_state())
 
     def _build_status_card(self, parent):
         outer = tk.Frame(parent, bg=C["card"], highlightthickness=1, highlightbackground=C["border"])
@@ -551,10 +596,10 @@ class App(tk.Tk):
             lbl.pack(pady=(0, 6))
             return lbl
 
-        self.pass_lbl = tile(0, "PASS", C["ok"], C["ok_soft"])
-        self.fail_lbl = tile(1, "FAIL", C["err"], C["err_soft"])
+        self.pass_lbl = tile(0, "PASS", C["ok_text"], C["ok_soft"])
+        self.fail_lbl = tile(1, "FAIL", C["err_text"], C["err_soft"])
         self.total_lbl = tile(2, "TOTAL", C["text"], C["idle_soft"])
-        self.yield_lbl = tile(3, "YIELD", C["accent"], C["accent_soft"])
+        self.yield_lbl = tile(3, "YIELD", C["accent_text"], C["accent_soft"])
 
     def _build_tools_card(self, parent):
         card = self._card(parent, "Target tools")
@@ -582,15 +627,16 @@ class App(tk.Tk):
         cmd_entry.bind("<Return>", lambda e: self.send_raw())
         self._track(ttk.Button(cmdrow, text="Send", command=self.send_raw)).pack(side="left")
         self.log = tk.Text(b, height=7, font=(MONO, 9), state="disabled", wrap="none", relief="flat",
-                           bg="#f8fafc", fg=C["text"], padx=8, pady=6, highlightthickness=0)
+                           bg=C["log_bg"], fg=C["text"], padx=8, pady=6, highlightthickness=0,
+                           insertbackground=C["text"], selectbackground=C["accent"])
         sb = ttk.Scrollbar(b, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         self.log.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.log.tag_configure("err", foreground=C["err"])
-        self.log.tag_configure("ok", foreground=C["ok"])
+        self.log.tag_configure("err", foreground=C["err_text"])
+        self.log.tag_configure("ok", foreground=C["ok_text"])
         self.log.tag_configure("dim", foreground=C["muted"])
-        self.log.tag_configure("time", foreground="#94a3b8")
+        self.log.tag_configure("time", foreground=C["log_time"])
 
     # ================================================================ helpers
     def write_log(self, text, tag=None):
@@ -627,8 +673,8 @@ class App(tk.Tk):
         self.ui_q.put(("call", (fn, args, kwargs)))
 
     def _set_banner(self, title, msg="", kind="idle"):
-        bg, fg = {"idle": (C["idle_soft"], C["text"]), "busy": (C["accent_soft"], C["accent"]),
-                  "ok": (C["ok_soft"], C["ok"]), "err": (C["err_soft"], C["err"]),
+        bg, fg = {"idle": (C["idle_soft"], C["text"]), "busy": (C["accent_soft"], C["accent_text"]),
+                  "ok": (C["ok_soft"], C["ok_text"]), "err": (C["err_soft"], C["err_text"]),
                   "off": (C["idle_soft"], C["muted"])}[kind]
         for w in (self.banner, self.state_lbl, self.result_lbl):
             w.configure(bg=bg)
@@ -642,7 +688,7 @@ class App(tk.Tk):
             self.flash_hint.configure(text="Connect the programmer first.")
         elif self.dev_info.get("img") != "1":
             self.flash_hint.configure(text="No firmware on the programmer yet — upload one first (step 3).")
-        elif self.mode_var.get() == "auto":
+        elif (self._saved_settings or {}).get("mode") == "auto":
             self.flash_hint.configure(text="Auto-detect is on: place a board on the fixture and it is flashed "
                                            "automatically.  F5 flashes now.")
         else:
@@ -659,7 +705,7 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
         self._update_upload_button()
-        self._update_flash_hint()
+        self._update_settings_state()
 
     # ================================================================ connection
     def refresh_ports(self):
@@ -734,17 +780,18 @@ class App(tk.Tk):
         self.refresh_btn.state(["disabled"] if on else ["!disabled"])
         if on:
             self.conn_btn.configure(text="Disconnect", style="TButton")
-            self.status_pill.configure(text="●  Connected", bg="#14352a", fg="#86efac")
+            self.status_pill.configure(text="●  Connected", bg=C["pill_on_bg"], fg=C["pill_on_fg"])
             self.hint.pack_forget()
             self._set_banner("Ready", "Programmer connected.", "idle")
         else:
             self.device_busy = False
             self.conn_btn.configure(text="Connect", style="Accent.TButton")
-            self.status_pill.configure(text="●  Disconnected", bg="#3f1d24", fg="#fca5a5")
+            self.status_pill.configure(text="●  Disconnected", bg=C["pill_off_bg"], fg=C["pill_off_fg"])
             if not self.hint.winfo_ismapped():
                 self.hint.pack(fill="x", after=self.winfo_children()[0])
             self._set_banner("Not connected", "Connect the programmer to begin.", "off")
             self.dev_info = {}
+            self._saved_settings = None
             self.dev_name.configure(text="—")
             self.dev_detail.configure(text="Connect to see the stored firmware.")
             self.match_lbl.configure(text="", bg=C["card"])
@@ -777,18 +824,14 @@ class App(tk.Tk):
             self.dev_name.configure(text="No firmware stored")
             self.dev_detail.configure(text="Load a .hex file below and upload it to the programmer.")
 
-        self.suppress_set = True
-        try:
-            self.mode_var.set(info.get("mode", "button"))
-            self.erase_var.set(info.get("erase", "chip"))
-            self.verify_var.set(info.get("verify", "1") == "1")
-            self.run_var.set(info.get("run", "1") == "1")
-            self.protect_var.set(info.get("protect", "0") == "1")
-            self.settle_var.set(info.get("settle", "500"))
-            self.swdelay_var.set(info.get("swdelay", "0"))
-        finally:
-            self.suppress_set = False
-        self._applied_numbers = (self.swdelay_var.get(), self.settle_var.get())
+        if "mode" in info:
+            self._saved_settings = {
+                "mode": info.get("mode", "button"), "erase": info.get("erase", "chip"),
+                "verify": info.get("verify", "1"), "run": info.get("run", "1"),
+                "protect": info.get("protect", "0"), "swdelay": info.get("swdelay", "0"),
+                "settle": info.get("settle", "500"),
+            }
+            self._show_settings(self._saved_settings)
         self._set_counts(int(info.get("pass", 0)), int(info.get("fail", 0)))
         self._update_match()
         self._update_enabled()
@@ -810,7 +853,7 @@ class App(tk.Tk):
         if not self.link.is_open or not self.image or stored is None:
             self.match_lbl.configure(text="", bg=C["card"])
         elif stored == self.image[3]:
-            self.match_lbl.configure(text="✓  Same as the file selected below", bg=C["ok_soft"], fg=C["ok"])
+            self.match_lbl.configure(text="✓  Same as the file selected below", bg=C["ok_soft"], fg=C["ok_text"])
         else:
             self.match_lbl.configure(text="⚠  Different from the file selected below — upload to replace it",
                                      bg=C["warn_soft"], fg=C["warn"])
@@ -888,30 +931,72 @@ class App(tk.Tk):
         self.call(self._apply_device_info, parse_kv(info), self.chips)
 
     # ================================================================ settings
-    def _apply_setting(self, key, value):
-        if self.suppress_set or not self.link.is_open:
+    def _current_settings(self):
+        def num(var, default):
+            try:
+                return str(int(var.get()))
+            except ValueError:
+                return default
+        return {
+            "mode": self.mode_var.get(), "erase": self.erase_var.get(),
+            "verify": str(int(self.verify_var.get())), "run": str(int(self.run_var.get())),
+            "protect": str(int(self.protect_var.get())),
+            "swdelay": num(self.swdelay_var, "0"), "settle": num(self.settle_var, "500"),
+        }
+
+    def _show_settings(self, st):
+        self.suppress_set = True
+        try:
+            self.mode_var.set(st["mode"])
+            self.erase_var.set(st["erase"])
+            self.verify_var.set(st["verify"] == "1")
+            self.run_var.set(st["run"] == "1")
+            self.protect_var.set(st["protect"] == "1")
+            self.swdelay_var.set(st["swdelay"])
+            self.settle_var.set(st["settle"])
+        finally:
+            self.suppress_set = False
+        self._update_settings_state()
+
+    def _changed_settings(self):
+        if not self._saved_settings:
+            return {}
+        cur = self._current_settings()
+        return {k: v for k, v in cur.items() if self._saved_settings.get(k) != v}
+
+    def _update_settings_state(self):
+        if self.suppress_set:
+            return
+        self._update_flash_hint()
+        changed = self._changed_settings()
+        ready = self.link.is_open and not self.device_busy and self._saved_settings is not None
+        if not ready:
+            self.saved_lbl.configure(text="Connect to view and change the programmer settings.", fg=C["muted"])
+        elif changed:
+            n = len(changed)
+            self.saved_lbl.configure(text=f"●  {n} unsaved change{'s' if n > 1 else ''}", fg=C["warn"])
+        else:
+            self.saved_lbl.configure(text="✓  Saved on the programmer", fg=C["ok_text"])
+        for btn in (self.save_btn, self.revert_btn):
+            btn.state(["!disabled"] if ready and changed else ["disabled"])
+
+    def save_settings(self):
+        changed = self._changed_settings()
+        if not changed:
             return
 
         def work():
-            self.link.request(f"SET {key} {value}")
-            self.call(self.saved_lbl.configure, text=f"✓  Saved: {key} = {value}")
-            if key == "mode":
-                self.call(self._update_flash_hint)
+            for key, value in changed.items():
+                self.link.request(f"SET {key} {value}")
+            info = parse_kv(self.link.request("INFO"))
+            self.ui_q.put(("log", ("Settings saved: " + ", ".join(f"{k}={v}" for k, v in changed.items()), "ok")))
+            self.call(self._apply_device_info, info, self.chips)
 
-        threading.Thread(target=self._safe, args=(work, "Settings"), daemon=True).start()
+        self.run_bg("Save settings", work)
 
-    def _apply_numbers(self):
-        if self.suppress_set or not self.link.is_open:
-            return
-        try:
-            vals = (str(int(self.swdelay_var.get())), str(int(self.settle_var.get())))
-        except ValueError:
-            return
-        if vals == getattr(self, "_applied_numbers", None):
-            return
-        self._applied_numbers = vals
-        self._apply_setting("swdelay", vals[0])
-        self._apply_setting("settle", vals[1])
+    def revert_settings(self):
+        if self._saved_settings:
+            self._show_settings(self._saved_settings)
 
     def _safe(self, fn, title):
         try:
@@ -1110,7 +1195,13 @@ class App(tk.Tk):
         elif ev == "CHIP":
             self.write_log(f"Target: {parts[2]} ({parts[3]})")
         elif ev == "TARGET":
-            self.write_log(f"Board {parts[2]}", "dim")
+            if parts[2] == "present":
+                self.write_log("Board detected (auto mode)", "dim")
+                settle = (self._saved_settings or {}).get("settle", "500")
+                self._set_banner("Board detected", f"Flashing starts in {settle} ms…", "busy")
+            else:
+                self.write_log("Board removed — waiting for the next one", "dim")
+                self._set_banner("Waiting for board", "Place the next board on the fixture.", "idle")
         elif ev == "RESULT":
             self._on_result(line)
         elif ev == "BOOT":
