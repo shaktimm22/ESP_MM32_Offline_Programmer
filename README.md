@@ -9,6 +9,7 @@ A standalone production programmer for MindMotion MM32 Cortex-M0 MCUs, such as t
 
 ```
  PC (tools/mm32_flasher_ui.py) ──USB/UART 460800──> ESP8266 ──SWD──> MM32 target
+ Phone / laptop browser ──────Wi-Fi AP + HTTP─────────┘
 ```
 
 ## 1. Hardware
@@ -64,6 +65,27 @@ python tools/mm32_flasher_ui.py      (or double-click tools/run_ui.bat)
 6. Watch the PASS/FAIL counters. Every result is also appended to `tools/flash_log.csv`.
 
 Once the image is uploaded, the PC can be unplugged. The programmer works on any 5 V USB supply, and the counters are kept on the device.
+
+### Web UI (Wi-Fi)
+
+The programmer also runs its own Wi-Fi network with the same UI in a browser. Use it from a phone or laptop, with no USB cable or Python needed.
+
+1. Join the Wi-Fi network **`MM32-Flasher-XXXX`** (XXXX = the end of the MAC address). It is open by default.
+2. The phone or laptop should open the page by itself (captive portal). If it does not, browse to **http://mm32-flasher.local** or **http://192.168.4.1**.
+
+The page has the same cards as the desktop app: stored image, upload (.hex/.bin, parsed in the browser), settings, FLASH with live progress, counters, target tools, chip table and the activity log. **Download results (.csv)** saves the PASS/FAIL results seen while the page was open.
+
+The USB UI and the web UI can be used at the same time. Both send the same commands, and the web page shows flashes started from the button, auto-detect or the USB app. While a flash is running, the web page only shows status; every other command waits until it finishes.
+
+To set a password, SSID or hostname, uncomment the `WIFI_AP_*` / `MDNS_HOSTNAME` flags in `platformio.ini` (the password needs 8–63 characters). The page source is [web/index.html](web/index.html). It is gzipped into `src/web_page.h` on every build by `tools/embed_web.py`, so no `uploadfs` is needed (`uploadfs` would erase the stored image and settings).
+
+HTTP API (same line protocol as section 6):
+
+| Route | |
+|---|---|
+| `POST /api/cmd` `c=<command>` | runs one command, returns `@OK ...` / `@ERR ...` |
+| `GET /api/events?since=<seq>` | first line `<seq> <busy>`, then the `@EVT` lines after `<seq>` |
+| `POST /api/upload?size=&crc=&base=&target=&name=` | multipart file with the binary image; returns the `END` reply |
 
 ### Programming sequence (per target)
 
@@ -141,6 +163,7 @@ Events:
 - `@EVT COUNT <pass> <fail>`
 - `@EVT TARGET present|absent`
 - `@EVT BOOT ...`
+- `@EVT WIFI ssid=<name> ip=<ip> url=<url> open|secured`
 
 ## 7. Troubleshooting
 | Symptom | Fix |

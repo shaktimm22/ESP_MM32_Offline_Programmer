@@ -6,3 +6,4 @@
 tools/flash_log.csv
 __pycache__/
 tools/ui_prefs.json
+src/web_page.h

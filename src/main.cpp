@@ -1,14 +1,16 @@
 // MM32 offline programmer for ESP8266.
 // The PC UI talks to this over UART with a line protocol (see README.md):
 // every reply starts with "@OK" / "@ERR", asynchronous events with "@EVT".
+// The web UI (web.cpp) sends the same commands over HTTP and receives the same events.
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
 #include <LittleFS.h>
+#include <StreamString.h>
 
 #include "mm32.h"
 #include "pins.h"
 #include "storage.h"
 #include "swd.h"
+#include "web.h"
 
 #ifndef SERIAL_BAUD
 #define SERIAL_BAUD 460800
@@ -43,22 +45,36 @@ static void beep(uint32_t ms, uint8_t times) {
 
 // ---------------------------------------------------------------- events
 
-static void evtCount() { Serial.printf("@EVT COUNT %u %u\n", stats.pass, stats.fail); }
+// Sends "@EVT <...>" to the UART and to the web UI's event queue.
+static void evt(const char *fmt, ...) {
+  char buf[web::EVT_LEN];
+  int n = snprintf(buf, sizeof(buf), "@EVT ");
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf + n, sizeof(buf) - n, fmt, ap);
+  va_end(ap);
+  Serial.println(buf);
+  web::pushEvent(buf);
+}
 
-static void evtState(const char *s) { Serial.printf("@EVT STATE %s\n", s); }
+static void evtCount() { evt("COUNT %u %u", stats.pass, stats.fail); }
+
+static void evtState(const char *s) { evt("STATE %s", s); }
 
 static void onProgress(const char *stage, uint8_t pct) {
   static uint32_t lastMs = 0;
   if (pct == 100 || millis() - lastMs > 150) {
     lastMs = millis();
-    Serial.printf("@EVT PROGRESS %s %u\n", stage, pct);
+    evt("PROGRESS %s %u", stage, pct);
   }
   ledBusy((millis() / 100) & 1);
+  web::loop();  // keep the web UI responsive (status and progress only) while flashing
 }
 
 // ---------------------------------------------------------------- flashing
 
 static bool s_busy = false;
+static bool s_flashPending = false;  // FLASH received; runs from loop() once the reply is sent
 
 static const char *checkTarget(const mm32::Target &t, char *buf, size_t len) {
   if (!t.chip) {
@@ -102,7 +118,7 @@ static void runFlash() {
   }
   if (!err) err = checkTarget(t, msg, sizeof(msg));
   if (!err) {
-    Serial.printf("@EVT CHIP %s 0x%08X\n", t.chip->name, t.devId);
+    evt("CHIP %s 0x%08X", t.chip->name, t.devId);
     evtState("erase");
     err = cfg.erase == storage::ERASE_PAGES ? mm32::pageErase(meta.base, meta.size, t.chip->pageSize)
                                             : mm32::massErase();
@@ -133,7 +149,7 @@ static void runFlash() {
   if (!err) {
     stats.pass++;
     storage::saveStats();
-    Serial.printf("@EVT RESULT PASS %u %s 0x%08X\n", ms, t.chip->name, t.devId);
+    evt("RESULT PASS %u %s 0x%08X", ms, t.chip->name, t.devId);
     ledResult(1);
     beep(80, 1);
   } else {
@@ -141,7 +157,7 @@ static void runFlash() {
       stats.fail++;
       storage::saveStats();
     }
-    Serial.printf("@EVT RESULT FAIL %d %s\n", counted ? 1 : 0, err);
+    evt("RESULT FAIL %d %s", counted ? 1 : 0, err);
     ledResult(0);
     beep(150, 3);
   }
@@ -166,7 +182,7 @@ static void pollAuto() {
     case AUTO_ARMED:
       s_autoHits = present ? s_autoHits + 1 : 0;
       if (s_autoHits >= 2) {
-        Serial.println("@EVT TARGET present");
+        evt("TARGET present");
         s_auto = AUTO_SETTLING;
         s_autoTimer = millis();
         return;
@@ -181,7 +197,7 @@ static void pollAuto() {
     case AUTO_WAIT_REMOVAL:
       s_autoHits = present ? 0 : s_autoHits + 1;
       if (s_autoHits >= 3) {  // gone for ~600 ms
-        Serial.println("@EVT TARGET absent");
+        evt("TARGET absent");
         s_auto = AUTO_ARMED;
         s_autoHits = 0;
       }
@@ -216,12 +232,24 @@ static int hexNibble(char c) {
   return -1;
 }
 
+// Appends a chunk to the image being uploaded; nullptr on success.
+static const char *uploadWrite(const uint8_t *data, size_t n) {
+  if (!s_up) return "no upload in progress";
+  if (s_upRecv + n > s_upSize) return "data beyond declared size";
+  if (s_up.write(data, n) != n) return "filesystem write failed";
+  s_upCrc = storage::crc32Update(s_upCrc, data, n);
+  s_upRecv += n;
+  return nullptr;
+}
+
 // ---------------------------------------------------------------- commands
 
+static Print *s_out = &Serial;  // where replies go: the UART, or a web request's buffer
+
 static void reply(const char *cmd, const String &s = String()) {
-  Serial.printf("@OK %s%s%s\n", cmd, s.length() ? " " : "", s.c_str());
+  s_out->printf("@OK %s%s%s\n", cmd, s.length() ? " " : "", s.c_str());
 }
-static void replyErr(const char *cmd, const char *msg) { Serial.printf("@ERR %s %s\n", cmd, msg); }
+static void replyErr(const char *cmd, const char *msg) { s_out->printf("@ERR %s %s\n", cmd, msg); }
 
 static String infoString() {
   String s;
@@ -316,10 +344,7 @@ static void handleLine(char *line) {
       if (hi < 0 || lo < 0) return replyErr(c, "bad hex");
       buf[n++] = (hi << 4) | lo;
     }
-    if (s_upRecv + n > s_upSize) return replyErr(c, "data beyond declared size");
-    if (s_up.write(buf, n) != n) return replyErr(c, "filesystem write failed");
-    s_upCrc = storage::crc32Update(s_upCrc, buf, n);
-    s_upRecv += n;
+    if (const char *err = uploadWrite(buf, n)) return replyErr(c, err);
     reply(c, String(s_upRecv));
   } else if (cmd == "END") {
     if (!s_up) return replyErr(c, "no upload in progress");
@@ -340,7 +365,7 @@ static void handleLine(char *line) {
     reply(c);
   } else if (cmd == "FLASH") {
     reply(c);
-    runFlash();
+    s_flashPending = true;
   } else if (cmd == "DETECT") {
     mm32::Target t;
     const char *err = mm32::attach(t);
@@ -468,12 +493,23 @@ static void pollSerial() {
   }
 }
 
+// Runs one protocol line for the web UI and returns its reply ("@OK ..." / "@ERR ...").
+static String webCommand(const char *line) {
+  static char buf[256];
+  strlcpy(buf, line, sizeof(buf));
+  StreamString out;
+  s_out = &out;
+  handleLine(buf);
+  s_out = &Serial;
+  out.trim();
+  return out;
+}
+
+static bool webBusy() { return s_busy || s_flashPending; }
+
 // ---------------------------------------------------------------- main
 
 void setup() {
-  WiFi.mode(WIFI_OFF);
-  WiFi.forceSleepBegin();
-
   pinMode(PIN_LED_BUSY, OUTPUT);
   pinMode(PIN_LED_PASS, OUTPUT);
   pinMode(PIN_LED_FAIL, OUTPUT);
@@ -489,16 +525,23 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Serial.println();
 
-  if (!storage::begin()) Serial.println("@EVT ERROR filesystem mount failed");
+  if (!storage::begin()) evt("ERROR filesystem mount failed");
   swd::begin();
   swd::setDelay(cfg.swdDelay);
 
-  Serial.println("@EVT BOOT MM32-FLASHER " FW_VERSION);
+  web::begin({webCommand, webBusy, uploadWrite});
+
+  evt("BOOT MM32-FLASHER " FW_VERSION);
   evtCount();
 }
 
 void loop() {
   pollSerial();
+  web::loop();
+  if (s_flashPending) {
+    s_flashPending = false;
+    runFlash();
+  }
   pollButton();
   pollAuto();
 }
