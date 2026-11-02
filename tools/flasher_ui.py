@@ -410,15 +410,18 @@ class App(tk.Tk):
         "connect": "Connecting to target", "erase": "Erasing", "program": "Programming",
         "verify": "Verifying", "protect": "Setting read protection",
     }
+    LOG_MIN = 130  # px the activity log keeps before the page starts to scroll
 
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        screen_h = self.winfo_screenheight()
-        self.geometry(f"1200x{min(960, screen_h - 80)}")
-        self.minsize(1060, 760)
-        if screen_h < 1000:
-            self.state("zoomed")  # small laptop screens: use the whole screen
+        # Sizes are in Windows' scaled pixels: at 150% display scale a 1920x1080 laptop has only
+        # 1280x720 of them. Never ask for more than the screen; the body scrolls when it does not fit.
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{min(1200, screen_w - 40)}x{min(960, screen_h - 80)}")
+        self.minsize(min(720, screen_w - 40), min(480, screen_h - 120))
+        if screen_h < 1000 or screen_w < 1240:
+            self.state("zoomed")  # small or scaled-up screens: use the whole screen
         self.configure(bg=C["bg"])
         self.ui_q = queue.Queue()
         self.link = SerialLink(self.ui_q.put)
@@ -585,14 +588,15 @@ class App(tk.Tk):
         # ---- header
         header = ttk.Frame(self, style="Header.TFrame", padding=(18, 12))
         header.pack(fill="x")
-        title = ttk.Frame(header, style="Header.TFrame")
+        self.header_title = title = ttk.Frame(header, style="Header.TFrame")
         title.pack(side="left")
         ttk.Label(title, text="Offline Programmer", style="HeaderTitle.TLabel").pack(anchor="w")
         self.header_sub = ttk.Label(title, text="", style="HeaderSub.TLabel")
         self.header_sub.pack(anchor="w")
 
-        conn = ttk.Frame(header, style="Header.TFrame")
+        self.header_conn = conn = ttk.Frame(header, style="Header.TFrame")
         conn.pack(side="right")
+        self.header_narrow = False
         self.status_pill = tk.Label(conn, text="●  Disconnected", bg=C["pill_off_bg"], fg=C["pill_off_fg"],
                                     font=(FONT, 9, "bold"), padx=10, pady=4)
         self.status_pill.pack(side="right", padx=(12, 0))
@@ -607,7 +611,7 @@ class App(tk.Tk):
         self.refresh_btn = ttk.Button(conn, text="↻", width=3, style="Header.TButton", command=self.refresh_ports)
         self.refresh_btn.pack(side="right", padx=(6, 0))
         self.port_var = tk.StringVar()
-        self.port_cb = ttk.Combobox(conn, textvariable=self.port_var, width=30, state="readonly",
+        self.port_cb = ttk.Combobox(conn, textvariable=self.port_var, width=24, state="readonly",
                                     style="Header.TCombobox")
         self.port_cb.pack(side="right")
         ttk.Label(conn, text="Port", style="Header.TLabel").pack(side="right", padx=(0, 6))
@@ -623,16 +627,18 @@ class App(tk.Tk):
         self.hint_lbl.pack(side="left")
         self.hint.pack(fill="x")
 
-        # ---- body
-        body = ttk.Frame(self, padding=(16, 14, 16, 14))
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=5, uniform="col")
-        body.columnconfigure(1, weight=6, uniform="col")
-        body.rowconfigure(1, weight=1, minsize=190)
-        left = ttk.Frame(body)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        right = ttk.Frame(body)
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        # ---- body: scrolls when the window is smaller than its content (large display scaling)
+        area = ttk.Frame(self)
+        area.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(area, bg=C["bg"], highlightthickness=0, bd=0, yscrollincrement=20)
+        self.vbar = ttk.Scrollbar(area, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.body = body = ttk.Frame(self.canvas, padding=(16, 14, 16, 14))
+        self.body_win = self.canvas.create_window(0, 0, window=body, anchor="nw")
+        self.left_col = left = ttk.Frame(body)
+        self.right_col = right = ttk.Frame(body)
+        self.layout_wide = None
 
         self._build_device_card(left)
         self._build_file_card(left)
@@ -642,6 +648,82 @@ class App(tk.Tk):
         self._build_counter_card(right)
         self._build_tools_card(right)
         self._build_log(body)
+        self._set_columns(True)
+        body.bind("<Configure>", lambda e: self._fit_body())
+        self.canvas.bind("<Configure>", lambda e: self._fit_body())
+        self.bind_all("<MouseWheel>", self._on_wheel, add="+")
+        # A wheel turn over a combobox would change its value (and load a model): scroll the page instead.
+        self.unbind_class("TCombobox", "<MouseWheel>")
+
+    def _fit_dialog(self, win, w, h):
+        """Size a dialog, but never larger than the screen (large display scaling)."""
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        win.geometry(f"{min(w, sw - 40)}x{min(h, sh - 100)}")
+
+    def _set_columns(self, wide):
+        """Two columns side by side, or one column (status and FLASH first) on narrow windows."""
+        if wide == self.layout_wide:
+            return
+        self.layout_wide = wide
+        b = self.body
+        for r in range(3):
+            b.rowconfigure(r, weight=0, minsize=0)
+        if wide:
+            b.columnconfigure(0, weight=5, uniform="col")
+            b.columnconfigure(1, weight=6, uniform="col")
+            self.left_col.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=(0, 8), pady=0)
+            self.right_col.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=(8, 0), pady=0)
+            self.log_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+            b.rowconfigure(1, weight=1, minsize=self.LOG_MIN)
+        else:
+            b.columnconfigure(0, weight=1, uniform="")
+            b.columnconfigure(1, weight=0, uniform="")
+            self.right_col.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=0, pady=0)
+            self.left_col.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=0, pady=(10, 0))
+            self.log_card.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+            b.rowconfigure(2, weight=1, minsize=self.LOG_MIN)
+
+    def _fit_body(self):
+        """Body as wide as the window and at least as tall; scrollbar only when it does not fit."""
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 50:
+            return
+        self._set_columns(cw >= 980)
+        narrow = cw < 900  # the connection controls go on their own line under the title
+        if narrow != self.header_narrow:
+            self.header_narrow = narrow
+            self.header_title.pack_forget()
+            self.header_conn.pack_forget()
+            if narrow:
+                self.header_title.pack(side="top", anchor="w")
+                self.header_conn.pack(side="top", anchor="w", pady=(10, 0))
+            else:
+                self.header_title.pack(side="left")
+                self.header_conn.pack(side="right")
+        # The activity log may shrink to LOG_MIN to avoid scrolling (it has its own scrollbar); once the
+        # page has to scroll anyway, the log gets its normal height back.
+        full = self.body.winfo_reqheight()
+        need = full - max(0, self.log_card.winfo_reqheight() - self.LOG_MIN)
+        if need > ch + 1:
+            need = full
+        h = max(ch, need)
+        self.canvas.itemconfigure(self.body_win, width=cw, height=h)
+        self.canvas.configure(scrollregion=(0, 0, cw, h))
+        if need > ch + 1:
+            if not self.vbar.winfo_ismapped():
+                self.vbar.pack(side="right", fill="y", before=self.canvas)
+        elif self.vbar.winfo_ismapped():
+            self.vbar.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def _on_wheel(self, e):
+        """Mouse wheel anywhere on the page scrolls it; the log and lists keep scrolling themselves."""
+        w = e.widget
+        if not self.vbar.winfo_ismapped() or not str(w).startswith(str(self.canvas)):
+            return  # nothing to scroll, or another window (dialogs, drop-down lists)
+        if isinstance(w, (tk.Text, tk.Listbox, ttk.Treeview)):
+            return
+        self.canvas.yview_scroll(-3 if e.delta > 0 else 3, "units")
 
     def _build_model_card(self, parent):
         card = self._card(parent, "Product model", "2")
@@ -860,7 +942,8 @@ class App(tk.Tk):
         tk.Frame(b, bg=C["border"], height=1).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 6))
         foot = ttk.Frame(b, style="Card.TFrame")
         foot.grid(row=6, column=0, columnspan=2, sticky="ew")
-        self.saved_lbl = tk.Label(foot, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9, "bold"))
+        self.saved_lbl = tk.Label(foot, text="", bg=C["card"], fg=C["muted"], font=(FONT, 9, "bold"),
+                                  wraplength=230, justify="left")
         self.saved_lbl.pack(side="left")
         self.save_btn = ttk.Button(foot, text="Save to programmer", style="Accent.TButton", command=self.save_settings)
         self.save_btn.pack(side="right")
@@ -941,7 +1024,7 @@ class App(tk.Tk):
 
     def _build_log(self, parent):
         card = self._card(parent, "Activity log")
-        card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        self.log_card = card  # placed by _set_columns
         b = card.body
         self.cmdrow = cmdrow = ttk.Frame(b, style="Card.TFrame")
         cmdrow.pack(side="bottom", fill="x", pady=(6, 0))
@@ -1929,7 +2012,7 @@ class App(tk.Tk):
         win.title("Bulk import")
         win.configure(bg=C["card"])
         win.transient(parent)
-        win.geometry("900x520")
+        self._fit_dialog(win, 900, 520)
         body = ttk.Frame(win, style="Card.TFrame", padding=14)
         body.pack(fill="both", expand=True)
         counts = {k: sum(1 for r in rows if r[5] == k) for k in ("new", "update", "same", "skip", "error")}
@@ -1969,7 +2052,7 @@ class App(tk.Tk):
             on_done()
 
         btns = ttk.Frame(body, style="Card.TFrame")
-        btns.pack(fill="x", pady=(10, 0))
+        btns.pack(side="bottom", fill="x", pady=(10, 0), before=frame)  # stays visible on short screens
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
         imp = ttk.Button(btns, text=f"Import {len(items)} models", style="Accent.TButton", command=do_import)
         imp.pack(side="right", padx=6)
@@ -1983,7 +2066,7 @@ class App(tk.Tk):
         win.title("Firmware catalog")
         win.configure(bg=C["card"])
         win.transient(self)
-        win.geometry("1180x540")
+        self._fit_dialog(win, 1180, 540)
         body = ttk.Frame(win, style="Card.TFrame", padding=14)
         body.pack(fill="both", expand=True)
 
@@ -2162,18 +2245,21 @@ class App(tk.Tk):
             self.write_log(f"Catalog folder: {self.catalog_dir} ({len(self.models)} models)", "ok")
             fill()
 
+        # Two button rows pinned to the bottom, so they fit and stay visible on small / scaled screens.
+        files_row = ttk.Frame(body, style="Card.TFrame")
+        files_row.pack(side="bottom", fill="x", pady=(6, 0), before=frame)
         btns = ttk.Frame(body, style="Card.TFrame")
-        btns.pack(fill="x")
+        btns.pack(side="bottom", fill="x", before=files_row)
         ttk.Button(btns, text="Add current setup…", style="Accent.TButton",
                    command=guarded(add_current)).pack(side="left")
         ttk.Button(btns, text="Bulk import…", command=guarded(bulk_import)).pack(side="left", padx=(6, 0))
         ttk.Button(btns, text="Load selected", command=guarded(load_selected)).pack(side="left", padx=6)
         ttk.Button(btns, text="Delete", command=guarded(delete)).pack(side="left")
-        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
-        ttk.Button(btns, text="Change folder…", command=guarded(change_folder)).pack(side="right", padx=(0, 6))
-        ttk.Button(btns, text="Open folder", command=guarded(open_folder)).pack(side="right", padx=6)
-        ttk.Button(btns, text="Export .zip…", command=guarded(do_export)).pack(side="right")
-        ttk.Button(btns, text="Import .zip…", command=guarded(do_import)).pack(side="right", padx=6)
+        ttk.Button(files_row, text="Import .zip…", command=guarded(do_import)).pack(side="left")
+        ttk.Button(files_row, text="Export .zip…", command=guarded(do_export)).pack(side="left", padx=6)
+        ttk.Button(files_row, text="Open folder", command=guarded(open_folder)).pack(side="left")
+        ttk.Button(files_row, text="Change folder…", command=guarded(change_folder)).pack(side="left", padx=6)
+        ttk.Button(files_row, text="Close", command=win.destroy).pack(side="right")
         tree.bind("<Double-1>", lambda e: guarded(load_selected)())
         fill()
 
