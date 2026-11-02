@@ -2,6 +2,7 @@
 #include <LittleFS.h>
 
 #include "family.h"
+#include "ident.h"
 #include "ra.h"
 #include "swd.h"
 
@@ -111,6 +112,21 @@ static bool command(const char *c, char *args) {
     } else {
       replyErr(c, err);
     }
+    finishSession(!err);
+  } else if (cmd == "IDENT") {
+    // IDENT <base> <len>...: unique ID and code flash CRC32s for identifying the firmware on a board.
+    // Nothing is written; the target runs again afterwards.
+    char *rest;
+    uint32_t base = strtoul(args, &rest, 0);
+    ra::Target t;
+    const char *err = ra::attach(t, cfg.reset);
+    if (!err) {
+      String s = "chip=" + String(t.part[0] ? t.part : "UNKNOWN") + " " + ident::uidField(t.uid) + " ";
+      uint32_t size = t.cfSize ? t.cfSize : 32 * 1024;  // unknown part: the smallest RA2E1
+      if (base < size) err = ident::swdCrcs(base, rest, size - base, s);
+      if (!err) reply(c, s);
+    }
+    if (err) replyErr(c, err);
     finishSession(!err);
   } else if (cmd == "ERASE") {
     // Whole code flash and data flash.

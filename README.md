@@ -80,6 +80,76 @@ python tools/flasher_ui.py      (or double-click tools/run_ui.bat)
 
 Once the image is uploaded, the PC can be unplugged. The programmer works on any 5 V USB supply, and the counters are kept on the device.
 
+### Firmware catalog
+
+With many product models, you pick a **model code**, not a file. The **firmware catalog** maps each model code (as printed on the product label) to its firmware file and settings. It is a plain folder, by default `Documents\Firmware Catalog`:
+
+```
+Firmware Catalog\
+  catalog.csv                        one row per model: model, client, description, family, chip, version, file, file_crc, settings
+  mm32\wt_cf36_10001_v1.1.3.hex      firmware files, copied in when a model is added
+  fortior\wt_fan_teak_v1.3.hex
+  renesas\ab_sw_4ch_v1.1.srec
+```
+
+**Adding a model:**
+1. Set the model up as usual: chip family, firmware file, *For chip* (MM32) or option bytes (Fortior), and the settings.
+2. **Catalog… → Add current setup…**, then enter the model code, a description and the firmware version.
+3. To release a new firmware version, do the same with the same model code. The old row is replaced.
+
+**Bulk import (many models on the same MCU):**
+1. In the main window, set the chip family, *For chip* (MM32) or option bytes (Fortior), and the settings. Every imported model gets these.
+2. **Catalog… → Bulk import…**, then select all the firmware files (Ctrl+A in the file dialog).
+3. File names must be `<client prefix>_<model>_v<version>.<ext>`, for example `wt_cf36_10001_v1.1.3.hex` (client `wt`, model `cf36_10001`, version `1.1.3`). The client ends at the first `_` and the version starts at the last `_v`, so model codes may contain `_` and `-`.
+4. A preview shows every file as **new**, **update** (v1.2 → v1.3), **unchanged**, **skipped** or **problem**. Click **Import** to add the new and updated models in one step.
+
+Rules the preview applies:
+- Files that are badly named, are not valid images for the family, or do not fit the chip are listed and not imported.
+- If several versions of one model are selected, the newest wins (1.10 counts as newer than 1.9).
+- A version older than the catalog's is skipped. To roll back on purpose, use *Add current setup…*.
+- Operators scan the **model code** (`cf36_10001`); `wt_cf36_10001` is accepted too. A model code can belong to only one client: a file whose code another client already uses is refused, so a scan is never ambiguous.
+- The programmer stores the image as `wt_cf36_10001_v1.1.3`. When a model is updated, its old firmware file is removed from the catalog folder.
+- Descriptions are left empty for new models and kept for updated ones.
+
+A model stores the image-related settings: verify, run, erase, read-protect (MM32), RES pin (Renesas) and option bytes (Fortior). The start mode, auto-detect settle time and SWD/FICE timing stay with the station.
+
+**Loading a model** (*Product model* box):
+- **Scan the product label with a USB barcode scanner**, type the code and press Enter, or pick it from the list. The UI loads that model's firmware and settings onto the programmer. If the programmer already holds it, nothing is uploaded, so switching models takes about a second.
+- The programmer stores the image as `<client>_<model>_v<version>`, so the web UI and any PC that connects can see which model is loaded.
+- Files, settings and tools stay available as before, so a model can still be adjusted, re-uploaded or flashed by hand.
+- `tools/flash_log.csv` records the model and version for every board. A log from an older UI version is renamed to `flash_log_until_<date>.csv` the first time.
+
+### Identify board: which firmware is on this board?
+
+**Target tools → Identify board** connects to the board on the fixture, reads it and writes **nothing**. Afterwards the board runs again. It answers two questions:
+
+1. **Which catalog firmware is on the chip.** The programmer computes checksums of the chip's flash, and the UI compares them with every catalog model of the selected family:
+   - **MM32:** CRC32 of the image range.
+   - **Renesas:** CRC32 of the code flash only, since firmware may rewrite its own data flash.
+   - **Fortior:** the chip's own CRC-16, which includes the option bytes.
+
+   This works for boards flashed on any PC, or before the log existed. If several models share one image, all of them are listed.
+2. **What the flash log says about this chip.** The UI looks up the chip's unique ID in `tools/flash_log*.csv` and shows how often it was flashed here, when, the result, and the model and version.
+
+| Family | Unique ID | Flash check |
+|---|---|---|
+| MM32 | 96-bit UID at `0x1FFFF7E8` (logged per board from firmware 2.2.0; older logs hold the DEV_ID) | Yes, unless the chip is **read-protected**. Then only the log can answer |
+| Renesas RA2E1 | 128-bit UID | Yes (code flash) |
+| Fortior FU68xx | None known over FICE | Yes (chip CRC) |
+
+Identify only recognises firmware that is still in the catalog. A version replaced by an update is reported as "no catalog firmware matches", but the flash log still shows what it was.
+
+**Safety checks:**
+- Each row stores the CRC32 of its file. A file that was replaced or edited by hand is refused until the model is added again.
+- MM32 models carry their chip (*For chip*), so the programmer rejects a board with a different chip.
+- An unknown code shows **Unknown model** and nothing is changed.
+
+**Sharing with another PC:**
+- **Catalog… → Export .zip…** writes the list and all firmware into one file. On the other PC, **Import .zip…** adds new models and replaces models with the same code, after checking every file's CRC.
+- You can also copy the whole folder, or point **Change folder…** at a USB stick or a OneDrive folder.
+
+Keep the catalog out of this git repository: it holds product firmware.
+
 ### Web UI (Wi-Fi)
 
 The programmer also runs its own Wi-Fi network, with the same UI in a browser. Use it from a phone or laptop, with no USB cable or Python needed.
@@ -117,6 +187,7 @@ All commands act on the **active family** (`SET family`). The family-specific co
 | `ABORT` | discard the upload |
 | `FLASH` | replies immediately, then sends events |
 | `DETECT` / `ERASE` / `RESET` | identify, erase, or reset and run the connected target |
+| `IDENT <base> <len>...` | read-only board check: `chip= uid= crcs=<len>:<crc32>,...` (zlib CRC32 of `base..base+len`; MM32 also `protected=`, no `crcs` when read-protected). Fortior: `IDENT` → `chip= id= uid=- chipcrc=0x....` |
 | `RESETCNT` | zero the counters (shared by all families) |
 
 Events:
@@ -152,9 +223,11 @@ src/family.h              interface each chip family implements
 src/family_mm32.cpp       MM32 back end      -> mm32.cpp (flash controller), swd.cpp (SWD bit-bang)
 src/family_fortior.cpp    FU68xx back end    -> fu68.cpp (command sequences), fice.cpp (FICE bit-bang)
 src/family_renesas.cpp    RA2E1 back end     -> ra.cpp (MF4 flash sequencer), swd.cpp (shared with MM32)
+src/ident.cpp             flash CRC32s for the IDENT board check (SWD families)
 src/storage.cpp           LittleFS: one image per family, settings, counters, MM32 chip table
 src/web.cpp               Wi-Fi AP, captive portal, HTTP API;  web/index.html = the page
 tools/flasher_ui.py       PC UI
+tools/catalog.py          firmware catalog (model code -> firmware + settings), zip export / import
 docs/<family>/            family guide and datasheets
 re/, captures/fortior/    FICE reverse engineering; captures as .sal sessions or xz-compressed CSV exports
 ```

@@ -38,4 +38,4 @@
 #define PIN_BUZZER 15  // D8 -> buzzer via transistor (active high). -1 to disable
 #endif
 
-#define FW_VERSION "2.1.0"
+#define FW_VERSION "2.2.0"

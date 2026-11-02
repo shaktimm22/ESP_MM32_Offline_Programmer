@@ -2,6 +2,7 @@
 #include <LittleFS.h>
 
 #include "family.h"
+#include "ident.h"
 #include "mm32.h"
 #include "swd.h"
 
@@ -67,7 +68,9 @@ static void flash(File &img, ProgressFn cb, Result &r) {
   if (!r.err) r.err = checkTarget(t, msg, sizeof(msg));
   if (!r.err) {
     strlcpy(r.chip, t.chip->name, sizeof(r.chip));
-    snprintf(r.id, sizeof(r.id), "0x%08X", t.devId);
+    // The unique ID tells boards apart in the PC log; DEV_ID only names the chip type.
+    if (t.uid[0]) strlcpy(r.id, t.uid, sizeof(r.id));
+    else snprintf(r.id, sizeof(r.id), "0x%08X", t.devId);
     evt("CHIP %s %s", r.chip, r.id);
     evt("STATE erase");
     r.err = cfg.erase == storage::ERASE_PAGES ? mm32::pageErase(meta.base, meta.size, t.chip->pageSize)
@@ -118,13 +121,34 @@ static bool command(const char *c, char *args) {
     const char *err = mm32::attach(t);
     if (!err) {
       char buf[160];
-      snprintf(buf, sizeof(buf), "dpidr=0x%08X devid=0x%08X chip=%s flash=%u protected=%d swdelay=%u", t.dpidr,
+      snprintf(buf, sizeof(buf), "dpidr=0x%08X devid=0x%08X chip=%s flash=%u protected=%d swdelay=%u ", t.dpidr,
                t.devId, t.chip ? t.chip->name : "UNKNOWN", t.chip ? t.chip->flashKB : 0, t.readProtected,
                t.swdDelay);
-      reply(c, buf);
+      reply(c, buf + ident::uidField(t.uid));
     } else {
       replyErr(c, err);
     }
+    finishSession(!err);
+  } else if (cmd == "IDENT") {
+    // IDENT <base> <len>...: unique ID and flash CRC32s for identifying the firmware on a board.
+    // Nothing is written; the target runs again afterwards.
+    char *rest;
+    uint32_t base = strtoul(args, &rest, 0);
+    mm32::Target t;
+    const char *err = mm32::attach(t);
+    if (!err) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "chip=%s devid=0x%08X protected=%d ", t.chip ? t.chip->name : "UNKNOWN", t.devId,
+               t.readProtected);
+      String s = String(buf) + ident::uidField(t.uid) + " ";
+      // Read protection blocks flash reads from the debugger: only the ID is available then.
+      if (!t.readProtected && base >= mm32::FLASH_BASE) {
+        uint32_t size = t.chip ? (uint32_t)t.chip->flashKB * 1024 : 16 * 1024;
+        err = ident::swdCrcs(base, rest, mm32::FLASH_BASE + size - base, s);
+      }
+      if (!err) reply(c, s);
+    }
+    if (err) replyErr(c, err);
     finishSession(!err);
   } else if (cmd == "ERASE") {
     maintenance(c, nullptr, false, [] { return mm32::massErase(); });

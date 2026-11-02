@@ -46,6 +46,7 @@ static constexpr uint32_t OBR_RDPRT = 1u << 1;
 static constexpr uint32_t ACR_PRFTBE = 1u << 4;
 static constexpr uint32_t OPT_RDP_ADDR = 0x1FFFF800;
 static constexpr uint32_t DEV_ID_ADDR = 0x40013400;
+static constexpr uint32_t UID_ADDR = 0x1FFFF7E8;  // 96-bit unique device ID
 
 // IDs from the MM32F0010 / MM32F0020 user manuals (DBG chapter).
 // devId 0 = flash geometry known from the datasheet, DEV_ID not yet known: the PC UI
@@ -244,6 +245,13 @@ const char *attach(Target &t) {
 
   if (!swd::read32(DEV_ID_ADDR, &t.devId)) t.devId = 0;
   t.chip = findChip(t.devId);
+
+  // Factory unique ID (MM32F0010 / F0020 user manuals: 3 words at 0x1FFFF7E8). Erased-looking
+  // values mean the part has none or the read did not work.
+  uint32_t uid[3];
+  if (swd::readBlock32(UID_ADDR, uid, 3) && !(uid[0] == uid[1] && uid[1] == uid[2] &&
+                                              (uid[0] == 0 || uid[0] == 0xFFFFFFFF)))
+    snprintf(t.uid, sizeof(t.uid), "%08X%08X%08X", uid[2], uid[1], uid[0]);
 
   uint32_t obr = 0;
   if (swd::read32(FLASH_OBR, &obr) && (obr & OBR_RDPRT)) t.readProtected = true;

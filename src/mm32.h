@@ -18,6 +18,7 @@ struct Target {
   const Chip *chip = nullptr;
   bool readProtected = false;
   uint32_t swdDelay = 0;  // SWD delay that worked for this connection
+  char uid[25] = "";      // 96-bit unique ID (UID1..UID3 @ 0x1FFFF7E8) as hex; "" = unreadable
 };
 
 typedef void (*ProgressFn)(const char *stage, uint8_t pct);

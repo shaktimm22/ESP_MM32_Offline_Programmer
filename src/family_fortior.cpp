@@ -81,6 +81,21 @@ static bool command(const char *c, char *args) {
       replyErr(c, err);
     }
     fu68::finish(true);
+  } else if (cmd == "IDENT") {
+    // The chip's own CRC-16 over its 16 KB flash; the PC compares it with each catalog image.
+    // The FU68xx has no known unique ID over FICE. Nothing is written.
+    fu68::Target t;
+    uint16_t crc = 0;
+    const char *err = fu68::attach(t);
+    if (!err) err = fu68::readCrc(&crc);
+    if (err) {
+      replyErr(c, err);
+    } else {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "chip=FU68xx id=%02X%02X%02X uid=- chipcrc=0x%04X", t.id0, t.id1, t.id2, crc);
+      reply(c, buf);
+    }
+    fu68::finish(true);
   } else if (cmd == "ERASE") {
     fu68::Target t;
     const char *err = fu68::attach(t);

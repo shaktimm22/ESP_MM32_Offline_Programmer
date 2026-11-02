@@ -4,11 +4,16 @@ Talks to the ESP8266 programmer over UART. Selects the chip family, loads an
 Intel HEX / S-record / BIN file, uploads it to the programmer's flash, configures the
 programmer, and shows live pass/fail counters.
 
+Product models: scan or type a model code; its firmware and settings come from the firmware
+catalog (see catalog.py) and are loaded onto the programmer.
+
 Requires: Python 3.8+, pyserial  (pip install pyserial)
 """
 
+import binascii
 import csv
 import datetime as dt
+import glob
 import json
 import os
 import queue
@@ -21,6 +26,8 @@ from tkinter import filedialog, messagebox, ttk
 
 import serial
 import serial.tools.list_ports
+
+import catalog as cat
 
 APP_TITLE = "Offline Programmer"
 DEFAULT_BAUD = 460800
@@ -60,11 +67,7 @@ RA_EXTRA_BASE, RA_EXTRA_END = 0x01010000, 0x01010040  # option-setting extra are
 
 def crc16_ccitt(data, crc=0xFFFF):
     """CRC-16/CCITT-FALSE, the algorithm of the FU68xx CRC unit Keil uses for verify."""
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
+    return binascii.crc_hqx(bytes(data), crc)  # same polynomial (0x1021), unreflected, in C
 
 
 def chip_crc(data, opt):
@@ -437,6 +440,12 @@ class App(tk.Tk):
         self.conn_widgets = []     # enabled only while connected
         self.tool_btns = []
         self.pulse_on = False
+        self.catalog_dir = self.prefs.get("catalog_dir") or cat.default_dir()
+        self.models = []
+        self.active_model = None   # catalog model whose image the programmer holds
+        for old in ("production", "pin_hash"):  # production mode was removed
+            self.prefs.pop(old, None)
+        self._load_catalog()
 
         self._styles()
         self._build()
@@ -628,16 +637,42 @@ class App(tk.Tk):
         self._build_device_card(left)
         self._build_file_card(left)
         self._build_settings_card(left)
+        self._build_model_card(right)
         self._build_status_card(right)
         self._build_counter_card(right)
         self._build_tools_card(right)
         self._build_log(body)
 
-    def _build_device_card(self, parent):
-        card = self._card(parent, "On the programmer", "2", action=("Refresh", self.refresh_device))
-        card.pack(fill="x")
+    def _build_model_card(self, parent):
+        card = self._card(parent, "Product model", "2")
+        card.pack(fill="x", pady=(0, 10))
         b = card.body
         row = ttk.Frame(b, style="Card.TFrame")
+        row.pack(fill="x")
+        self.model_var = tk.StringVar()
+        self.model_cb = ttk.Combobox(row, textvariable=self.model_var, font=(MONO, 13))
+        self.model_cb.pack(side="left", fill="x", expand=True)
+        self.model_cb.bind("<Return>", lambda e: (self.select_model(), "break")[1])
+        self.model_cb.bind("<KeyRelease>", self._filter_models)
+        self.model_cb.bind("<<ComboboxSelected>>", lambda e: self.select_model())
+        self.catalog_btn = ttk.Button(row, text="Catalog…", command=self.catalog_dialog)
+        self.catalog_btn.pack(side="right", padx=(8, 0))
+        self.model_btn = self._track(ttk.Button(row, text="Load model", style="Accent.TButton",
+                                                command=self.select_model))
+        self.model_btn.pack(side="right", padx=(8, 0))
+        self.model_name = ttk.Label(b, text="", style="FileName.TLabel")
+        self.model_name.pack(anchor="w", pady=(8, 0))
+        self.model_detail = ttk.Label(b, text="", style="Muted.TLabel")
+        self.model_detail.pack(anchor="w")
+        self._fill_model_list()
+        self._show_active_model()
+
+    def _build_device_card(self, parent):
+        card = self._card(parent, "On the programmer", action=("Refresh", self.refresh_device))
+        card.pack(fill="x")
+        self.device_card = card
+        b = card.body
+        self.family_row = row = ttk.Frame(b, style="Card.TFrame")
         row.pack(fill="x", pady=(0, 8))
         ttk.Label(row, text="Chip family", style="Card.TLabel").pack(side="left", padx=(0, 12))
         self.family_var = tk.StringVar(value=self.family)
@@ -655,8 +690,9 @@ class App(tk.Tk):
         self.match_lbl.pack(anchor="w")
 
     def _build_file_card(self, parent):
-        card = self._card(parent, "Load new firmware", "3")
+        card = self._card(parent, "Load firmware file")
         card.pack(fill="x", pady=10)
+        self.file_card = card
         b = card.body
         row = ttk.Frame(b, style="Card.TFrame")
         row.pack(fill="x")
@@ -751,6 +787,7 @@ class App(tk.Tk):
     def _build_settings_card(self, parent):
         card = self._card(parent, "Programmer settings")
         card.pack(fill="both", expand=True)
+        self.settings_card = card
         b = card.body
         b.columnconfigure(1, weight=1)
 
@@ -890,12 +927,12 @@ class App(tk.Tk):
             self.conn_widgets.remove(btn)
             btn.destroy()
         if self.family == "mm32":
-            items = [("Detect chip", self.detect), ("Reset target", self.reset_target),
-                     ("Chip table…", self.chips_dialog), ("Erase chip", self.erase_chip),
-                     ("Unlock (remove RDP)", self.unlock)]
+            items = [("Identify board", self.identify), ("Detect chip", self.detect),
+                     ("Reset target", self.reset_target), ("Chip table…", self.chips_dialog),
+                     ("Erase chip", self.erase_chip), ("Unlock (remove RDP)", self.unlock)]
         else:  # Fortior, Renesas
-            items = [("Detect chip", self.detect), ("Reset & run target", self.reset_target),
-                     ("Erase chip", self.erase_chip)]
+            items = [("Identify board", self.identify), ("Detect chip", self.detect),
+                     ("Reset & run target", self.reset_target), ("Erase chip", self.erase_chip)]
         self.tool_btns = []
         for i, (txt, fn) in enumerate(items):
             btn = self._track(ttk.Button(self.tools_body, text=txt, command=fn))
@@ -906,7 +943,7 @@ class App(tk.Tk):
         card = self._card(parent, "Activity log")
         card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
         b = card.body
-        cmdrow = ttk.Frame(b, style="Card.TFrame")
+        self.cmdrow = cmdrow = ttk.Frame(b, style="Card.TFrame")
         cmdrow.pack(side="bottom", fill="x", pady=(6, 0))
         ttk.Label(cmdrow, text="Command", style="Muted.TLabel").pack(side="left")
         self.cmd_var = tk.StringVar()
@@ -975,7 +1012,7 @@ class App(tk.Tk):
         if not self.link.is_open:
             self.flash_hint.configure(text="Connect the programmer first.")
         elif self.dev_info.get("img") != "1":
-            self.flash_hint.configure(text="No firmware on the programmer yet — upload one first (step 3).")
+            self.flash_hint.configure(text="No firmware on the programmer yet — load a model or upload a file.")
         elif (self._saved_settings or {}).get("mode") == "auto":
             self.flash_hint.configure(text="Auto-detect is on: place a board on the fixture and it is flashed "
                                            "automatically.  F5 flashes now.")
@@ -1026,8 +1063,7 @@ class App(tk.Tk):
         self.family_var.set(fam)
         self.prefs["family"] = fam
         save_prefs(self.prefs)
-        f = FAMILIES[fam]
-        self.header_sub.configure(text=f"{f['name']}  ·  {f['iface']} production flasher  ·  ESP8266")
+        self._update_header()
         mm32 = fam == "mm32"
         self.opt_row.pack_forget()
         self.crc_lbl.pack_forget()
@@ -1199,8 +1235,9 @@ class App(tk.Tk):
             self.write_log(f"Programmer holds {name} for {FAMILIES[self.family]['name']} ({log})")
         else:
             self.dev_name.configure(text="No firmware stored")
-            self.dev_detail.configure(text=f"No {FAMILIES[self.family]['name']} image yet. Load a .hex file below "
-                                           f"and upload it to the programmer.")
+            self.dev_detail.configure(text=f"No {FAMILIES[self.family]['name']} image yet. Load a product model, "
+                                           f"or a firmware file in engineer mode.")
+        self._match_active_model()  # the image name tells which catalog model it is (Model.image_name)
 
         if "mode" in info:
             self._saved_settings = {k: info.get(k, SETTING_DEFAULTS[k]) for k in self._setting_keys()}
@@ -1328,10 +1365,10 @@ class App(tk.Tk):
         save_prefs(self.prefs)
         self.run_bg("Upload", self._upload_worker, path, data, fields)
 
-    def _upload_worker(self, path, data, fields):
+    def _upload_worker(self, path, data, fields, name=None, chips=None):
         """fields: the family part of BEGIN (MM32 "<base> <target>", Fortior "<option bytes>",
-        Renesas "<code flash bytes> <data flash bytes>")."""
-        name = os.path.basename(path).replace(" ", "_")[:40]
+        Renesas "<code flash bytes> <data flash bytes>"). name: stored image name (default: file name)."""
+        name = name or os.path.basename(path).replace(" ", "_")[:40]
         crc = zlib.crc32(data)
         self.link.request(f"BEGIN {len(data)} 0x{crc:08X} {fields} {name}")
         t0 = time.time()
@@ -1348,7 +1385,7 @@ class App(tk.Tk):
             raise
         self.ui_q.put(("log", (f"Uploaded {name}: {len(data):,} bytes in {time.time() - t0:.1f}s, "
                                f"CRC 0x{crc:08X} verified ({fields})", "ok")))
-        self.call(self._apply_device_info, parse_kv(info), self.chips)
+        self.call(self._apply_device_info, parse_kv(info), self.chips if chips is None else chips)
 
     # ================================================================ settings
     def _setting_keys(self):
@@ -1453,7 +1490,8 @@ class App(tk.Tk):
                 self.call(self._set_banner, "Chip detected", msg, "ok")
                 return
             self.last_detect = info
-            msg = (f"{info.get('chip')}  ·  DEV_ID {info.get('devid')}  ·  {info.get('flash')} KB flash  ·  "
+            msg = (f"{info.get('chip')}  ·  DEV_ID {info.get('devid')}  ·  UID {info.get('uid', '-')}  ·  "
+                   f"{info.get('flash')} KB flash  ·  "
                    f"read-protected: {'yes' if info.get('protected') == '1' else 'no'}  ·  "
                    f"SWD delay {info.get('swdelay')}")
             self.ui_q.put(("log", (f"Detected {msg}", "ok")))
@@ -1463,6 +1501,114 @@ class App(tk.Tk):
                 self.call(self._ask_identify, info.get("devid", ""))
 
         self.run_bg("Detect", work)
+
+    # ---- identify: which firmware is on this board? (reads only, nothing is written)
+    def _signature(self, m):
+        """What the chip reports for model m: ("crc32", base, length, crc) or ("chipcrc", crc16). Cached."""
+        cache = self.__dict__.setdefault("_sig_cache", {})
+        key = (m.file, m.file_crc, m.settings)
+        if key not in cache:
+            base, data, layout = load_image(cat.firmware_path(self.catalog_dir, m), m.family)
+            if m.family == "fortior":
+                cache[key] = ("chipcrc", chip_crc(data, m.settings_dict().get("opt", OPT_DEFAULT)))
+            elif m.family == "renesas":  # code flash only: the firmware may rewrite its data flash
+                cache[key] = ("crc32", 0, layout["cf"], zlib.crc32(data[:layout["cf"]])) if layout["cf"] else None
+            else:
+                cache[key] = ("crc32", base, len(data), zlib.crc32(data))
+        return cache[key]
+
+    def _ident_request(self, args):
+        try:
+            return parse_kv(self.link.request(f"IDENT {args}".strip(), timeout=30))
+        except LinkError as e:
+            if "unknown command" in str(e):
+                raise LinkError("the programmer firmware is too old for Identify. Upload firmware 2.2.0 or "
+                                "newer with PlatformIO.") from None
+            raise
+
+    def _flash_history(self, uid):
+        """flash_log*.csv rows of this chip ID, oldest first."""
+        rows = []
+        if not uid or uid == "-":
+            return rows
+        for path in glob.glob(os.path.join(os.path.dirname(LOG_CSV), "flash_log*.csv")):
+            try:
+                with open(path, newline="") as f:
+                    rows += [r for r in csv.DictReader(f) if (r.get("chip_id") or "").upper() == uid.upper()]
+            except OSError:
+                pass
+        return sorted(rows, key=lambda r: r.get("timestamp", ""))
+
+    def identify(self):
+        fam = self.family
+
+        def work():
+            self.call(self._set_banner, "Identifying board…", "Reading the chip. Nothing is written.", "busy")
+            sigs, broken = [], []
+            for m in self.models:
+                if m.family == fam:
+                    try:
+                        sig = self._signature(m)
+                        if sig:
+                            sigs.append((m, sig))
+                    except Exception:  # noqa: BLE001 - a missing / changed file must not stop the check
+                        broken.append(m.model)
+            info, crcs = {}, {}
+            if fam == "fortior":
+                info = self._ident_request("")
+                chip = int(info.get("chipcrc", "-1"), 16)
+                matches = [m for m, s in sigs if s[1] == chip]
+            else:
+                by_base = {}
+                for m, s in sigs:
+                    by_base.setdefault(s[1], set()).add(s[2])
+                if not by_base:
+                    by_base = {FLASH_BASE if fam == "mm32" else 0: set()}
+                for base, lens in by_base.items():
+                    lens = sorted(lens)
+                    for i in range(0, max(len(lens), 1), 60):  # keep each command line short
+                        part = self._ident_request(f"0x{base:08X} " + " ".join(map(str, lens[i:i + 60])))
+                        info = info or part
+                        for item in filter(None, part.get("crcs", "").split(",")):
+                            n, crc = item.split(":")
+                            crcs[(base, int(n))] = int(crc, 16)
+                matches = [m for m, s in sigs if crcs.get((s[1], s[2])) == s[3]]
+            history = self._flash_history(info.get("uid"))
+            self.call(self._show_identity, fam, info, matches, len(sigs), broken, history)
+
+        self.run_bg("Identify", work)
+
+    def _show_identity(self, fam, info, matches, checked, broken, history):
+        name = FAMILIES[fam]["name"]
+        uid = info.get("uid", "-")
+        chip = info.get("chip", name)
+        lines = [f"{chip}  ·  UID {uid}" if uid != "-" else f"{chip}  ·  no unique ID"]
+        if matches:
+            names = ", ".join(f"{m.model} v{m.version}" + (f" ({m.client})" if m.client else "") for m in matches)
+            title, kind = f"✓  {matches[0].model}  v{matches[0].version}", "ok"
+            lines.append(f"Firmware on the chip: {names}" + ("   (same image)" if len(matches) > 1 else ""))
+        elif info.get("protected") == "1":
+            title, kind = "Read-protected chip", "idle"
+            lines.append("The flash cannot be read back; only the flash log can tell what was programmed.")
+        else:
+            title, kind = "No catalog firmware matches", "err"
+            lines.append(f"The flash matches none of the {checked} {name} models in the catalog "
+                         f"(blank chip, another version, or firmware from elsewhere).")
+        if history:
+            last = history[-1]
+            what = f"{last.get('model')} v{last.get('version')}" if last.get("model") else last.get("image", "?")
+            lines.append(f"Flash log: {len(history)} entr{'y' if len(history) == 1 else 'ies'}, last "
+                         f"{last.get('timestamp', '').replace('T', ' ')}  {last.get('result')}  {what}")
+        elif uid != "-":
+            lines.append("Flash log: this chip was never flashed at this station.")
+        if broken:
+            lines.append(f"Not checked (file missing or changed): {', '.join(broken[:5])}"
+                         + (" …" if len(broken) > 5 else ""))
+        if not matches and history and info.get("protected") == "1":
+            title = f"Read-protected  ·  log says {what}"
+        self._set_banner(title, "\n".join(lines), kind)
+        for i, line in enumerate([title] + lines):
+            self.write_log(("Identify: " if i == 0 else "    ") + line, "ok" if kind == "ok" and i < 2 else None)
 
     def reset_target(self):
         def work():
@@ -1505,6 +1651,531 @@ class App(tk.Tk):
     def reset_counters(self):
         if messagebox.askyesno(APP_TITLE, "Reset PASS / FAIL counters on the programmer?"):
             self.run_bg("Reset counters", lambda: self.link.request("RESETCNT"))
+
+    def _update_header(self):
+        f = FAMILIES[self.family]
+        self.header_sub.configure(text=f"{f['name']}  ·  {f['iface']} production flasher  ·  ESP8266")
+
+    # ================================================================ product models (catalog)
+    def _load_catalog(self):
+        try:
+            self.models = cat.load(self.catalog_dir)
+        except Exception as e:  # noqa: BLE001
+            self.models = []
+            self.after(300, self.write_log, f"Cannot read the firmware catalog in {self.catalog_dir}: {e}", "err")
+
+    def _fill_model_list(self, models=None):
+        shown = sorted(models or self.models, key=cat.sort_key)
+        self.model_labels = {m.label(): m for m in shown}  # drop-down text -> model
+        self.model_cb["values"] = list(self.model_labels)
+
+    def _filter_models(self, event):
+        """Narrow the drop-down to the models matching what was typed (code or description)."""
+        if event.keysym in ("Return", "Up", "Down", "Escape", "Tab"):
+            return
+        text = self.model_var.get().strip().lower()
+        key = cat.normalize(text)
+        self._fill_model_list([m for m in self.models if key in m.key or text in m.description.lower()
+                               or text == m.client.lower()]
+                              if text else None)
+
+    def _match_active_model(self):
+        info = self.dev_info
+        self.active_model = next((m for m in self.models if info.get("img") == "1" and m.family == self.family
+                                  and m.image_name() == info.get("name")), None)
+        self._show_active_model()
+
+    def _show_active_model(self):
+        if not hasattr(self, "model_name"):
+            return
+        m = self.active_model
+        if m:
+            self.model_name.configure(text=f"{m.model}   v{m.version}" if m.version else m.model)
+            parts = [f"client {m.client}" if m.client else "", m.description, FAMILIES[m.family]["name"]]
+            if m.chip and m.chip != "ANY":
+                parts.append(m.chip)
+            parts.append(m.settings or "default settings")
+            self.model_detail.configure(text="   ·   ".join(p for p in parts if p))
+        elif not self.models:
+            self.model_name.configure(text="No firmware catalog yet")
+            self.model_detail.configure(text="Catalog… → Add current setup or Bulk import, or import a catalog "
+                                             ".zip from another PC.")
+        elif self.link.is_open and self.dev_info.get("img") == "1":
+            self.model_name.configure(text="Scan or type a model code")
+            self.model_detail.configure(text=f"The programmer holds {self.dev_info.get('name')}, which is not a "
+                                             f"catalog model.")
+        else:
+            self.model_name.configure(text="Scan or type a model code")
+            self.model_detail.configure(text=f"{len(self.models)} models in the catalog  ·  {self.catalog_dir}")
+        if hasattr(self, "flash_hint"):
+            self._update_flash_hint()
+
+    def select_model(self, code=None):
+        """Load a product model from the catalog onto the programmer (barcode scan / Enter / pick)."""
+        raw = code if code is not None else self.model_var.get()
+        picked = getattr(self, "model_labels", {}).get(raw)  # chosen from the drop-down
+        text = picked.model if picked else raw.strip()
+        if not text:
+            self.model_cb.focus_set()
+            return
+        m = picked or cat.find(self.models, text)
+        if not m:
+            self._set_banner("Unknown model", f"'{text}' is not in the firmware catalog "
+                                              f"({len(self.models)} models).", "err")
+            self.write_log(f"Unknown model code '{text}'", "err")
+            self.bell()
+            self.model_cb.select_range(0, "end")
+            return
+        if not self.link.is_open:
+            messagebox.showwarning(APP_TITLE, "Connect to the programmer first.")
+            return
+        if self.busy or self.device_busy:
+            messagebox.showinfo(APP_TITLE, "Wait for the current operation to finish.")
+            return
+        try:
+            path = cat.firmware_path(self.catalog_dir, m)
+            base, data, layout = load_image(path, m.family)
+        except Exception as e:  # noqa: BLE001
+            self._set_banner("Cannot load model", str(e), "err")
+            self.write_log(f"{m.model}: {e}", "err")
+            self.bell()
+            return
+        self.model_var.set("")
+        self._fill_model_list()
+        self._set_banner(f"Loading {m.model}…", m.description, "busy")
+        self.run_bg(f"Load {m.model}", self._model_worker, m, path, base, data, layout)
+
+    def _model_worker(self, m, path, base, data, layout):
+        try:
+            self._load_model(m, path, base, data, layout)
+        except Exception as e:
+            self.call(self._set_banner, f"✕  {m.model} not loaded", str(e), "err")
+            self.call(self.refresh_device)
+            raise
+
+    def _load_model(self, m, path, base, data, layout):
+        """(worker) Switch family, upload the image unless already stored, apply the model's settings."""
+        if self.dev_info.get("family") != m.family:
+            self.link.request(f"SET family {m.family}")
+        info = parse_kv(self.link.request("INFO"))
+        chips = parse_chips(self.link.request("CHIPS")) if m.family == "mm32" else None
+        st = m.settings_dict()
+        if m.family == "mm32":
+            target = m.chip or "ANY"
+            if target != "ANY":
+                chip = next((c for c in chips if c["name"] == target), None)
+                if not chip:
+                    raise LinkError(f"the programmer's chip table has no {target} (model {m.model}).")
+                if base + len(data) > FLASH_BASE + chip["kb"] * 1024:
+                    raise LinkError(f"the image ({len(data):,} bytes) does not fit {target} ({chip['kb']} KB).")
+            fields = f"0x{base:08X} {target}"
+        elif m.family == "renesas":
+            fields = f"{layout['cf']} {layout['df']}"
+        else:
+            fields = st.get("opt", OPT_DEFAULT).upper()
+        name = m.image_name()
+        try:
+            stored_crc = int(info.get("crc", ""), 16)
+        except ValueError:
+            stored_crc = None
+        stored = (info.get("img") == "1" and info.get("name") == name and stored_crc == zlib.crc32(data)
+                  and (m.family != "mm32" or info.get("target") == fields.split()[1]))
+        if not stored:
+            self._upload_worker(path, data, fields, name=name, chips=chips)
+        elif m.family == "fortior" and info.get("opt", "").upper() != fields:
+            self.link.request(f"OPT {fields}")
+        changed = []
+        for key, value in st.items():
+            if key != "opt" and info.get(key) != value:
+                self.link.request(f"SET {key} {value}")
+                changed.append(f"{key}={value}")
+        if changed:
+            self.ui_q.put(("log", (f"{m.model} settings applied: {', '.join(changed)}", "ok")))
+        info = parse_kv(self.link.request("INFO"))
+        self.call(self._apply_device_info, info, chips)
+        self.call(self._model_ready, m, path, not stored)
+
+    def _model_ready(self, m, path, uploaded):
+        if m.family == "mm32":
+            self.target_var.set(m.chip or "ANY")
+        elif m.family == "fortior":
+            self.opt_var.set(m.settings_dict().get("opt", OPT_DEFAULT).upper())
+        self._load_file(path, quiet=True)
+        self.active_model = m
+        self.prefs["model"] = m.model
+        save_prefs(self.prefs)
+        self._show_active_model()
+        how = "Firmware loaded onto the programmer" if uploaded else "Already on the programmer"
+        self._set_banner(f"✓  {m.model} ready", f"{how}.  Place a board and press FLASH.", "ok")
+        self.write_log(f"Model {m.model} v{m.version} ready ({m.description})", "ok")
+        self.model_cb.focus_set()
+
+    def _model_form(self, parent, title, summary, code="", client="", description="", version=""):
+        """Ask for model code, client prefix, description and version. Returns a tuple, or None if cancelled."""
+        win = tk.Toplevel(parent)
+        win.title(title)
+        win.configure(bg=C["card"])
+        win.transient(parent)
+        win.resizable(False, False)
+        body = ttk.Frame(win, style="Card.TFrame", padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=title, style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(body, text=summary, style="Muted.TLabel", justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 12))
+        vars_ = []
+        for i, (lbl, value, hint) in enumerate((("Model code", code, "as printed on the product label / barcode"),
+                                                ("Client prefix", client, "optional, e.g. wt"),
+                                                ("Description", description, "e.g. Ceiling fan, teak, white"),
+                                                ("Firmware version", version, "e.g. 1.1.3"))):
+            ttk.Label(body, text=lbl, style="Card.TLabel").grid(row=2 + 2 * i, column=0, sticky="w", padx=(0, 12))
+            var = tk.StringVar(value=value)
+            entry = ttk.Entry(body, textvariable=var, width=42)
+            entry.grid(row=2 + 2 * i, column=1, sticky="w", pady=(4, 0))
+            ttk.Label(body, text=hint, style="Muted.TLabel").grid(row=3 + 2 * i, column=1, sticky="w")
+            vars_.append(var)
+            if i == 0:
+                entry.focus_set()
+        result = []
+
+        def ok():
+            code_, client_, desc, ver = (v.get().strip() for v in vars_)
+            if not code_ or not ver:
+                messagebox.showerror(APP_TITLE, "Enter the model code and the firmware version.", parent=win)
+                return
+            if "_" in client_ or " " in client_:
+                messagebox.showerror(APP_TITLE, "The client prefix cannot contain '_' or spaces.", parent=win)
+                return
+            result.append((code_, client_, desc, ver))
+            win.destroy()
+
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.grid(row=10, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Save model", style="Accent.TButton", command=ok).pack(side="right", padx=6)
+        win.bind("<Return>", lambda e: ok())
+        win.grab_set()
+        self.wait_window(win)
+        return result[0] if result else None
+
+    def _bulk_plan(self, paths, fam, chip, settings):
+        """Check bulk import files. Returns rows (file, client, model, version, result, kind) and the
+        (Model, path) to add. kind: new / update / same / skip / error."""
+        rows, best, clash = [], {}, set()
+        limit = None
+        if fam == "mm32" and chip != "ANY":
+            c = next((c for c in self.chips if c["name"] == chip), None)
+            limit = FLASH_BASE + c["kb"] * 1024 if c else None
+        for path in paths:
+            fname = os.path.basename(path)
+            parsed = cat.parse_filename(path)
+            if not parsed:
+                rows.append([fname, "", "", "", "name is not <client>_<model>_v<version>", "error"])
+                continue
+            client, model, version = parsed
+            try:
+                base, data, _ = load_image(path, fam)
+                if limit and base + len(data) > limit:
+                    raise ValueError(f"{len(data):,} bytes do not fit {chip}")
+            except Exception as e:  # noqa: BLE001
+                rows.append([fname, client, model, version, f"not a valid {FAMILIES[fam]['name']} image: {e}",
+                             "error"])
+                continue
+            row = [fname, client, model, version, "", "new", path]
+            rows.append(row)
+            key = cat.normalize(model)
+            if key in best and best[key][1].lower() != client.lower():
+                # Two clients with one model code: a scan could not tell them apart, so import neither.
+                row[4], row[5] = f"model code also selected for client {best[key][1]}", "error"
+                clash.add(key)
+                continue
+            if key in best:  # several versions of one model: the newest wins
+                old = best[key]
+                newer, older = (row, old) if cat.version_key(version) > cat.version_key(old[3]) else (old, row)
+                older[4], older[5] = f"skipped: v{newer[3]} of this model is also selected", "skip"
+                best[key] = newer
+            else:
+                best[key] = row
+        items = []
+        for key, row in best.items():
+            fname, client, model, version, _, _, path = row
+            if key in clash:
+                row[4], row[5] = "model code also selected for another client", "error"
+                continue
+            old = cat.find(self.models, model)
+            crc = f"{cat.file_crc(path):08X}"
+            if old and old.client and old.client.lower() != client.lower():
+                row[4], row[5] = f"model code already used by client {old.client} (v{old.version})", "error"
+                continue
+            if old and cat.same_entry(old, client, fam, chip, version, settings, crc):
+                row[4], row[5] = "unchanged (already in the catalog)", "same"
+                continue
+            if old and cat.version_key(version) < cat.version_key(old.version):
+                row[4], row[5] = f"skipped: the catalog has newer v{old.version}", "skip"
+                continue
+            if old:
+                change = f"v{old.version} → v{version}" if old.version != version else "same version, new file/settings"
+                if old.family != fam:
+                    change += f" (was {old.family})"
+                row[4], row[5] = f"update: {change}", "update"
+            else:
+                row[4] = "new model"
+            items.append((cat.Model(model=model, client=client, description=old.description if old else "",
+                                    family=fam, chip=chip, version=version, settings=settings), path))
+        return [r[:6] for r in rows], items
+
+    def _bulk_preview(self, parent, paths, fam, chip, settings, summary, on_done):
+        rows, items = self._bulk_plan(paths, fam, chip, settings)
+        win = tk.Toplevel(parent)
+        win.title("Bulk import")
+        win.configure(bg=C["card"])
+        win.transient(parent)
+        win.geometry("900x520")
+        body = ttk.Frame(win, style="Card.TFrame", padding=14)
+        body.pack(fill="both", expand=True)
+        counts = {k: sum(1 for r in rows if r[5] == k) for k in ("new", "update", "same", "skip", "error")}
+        ttk.Label(body, text=f"{len(paths)} files   ·   {counts['new']} new   ·   {counts['update']} updated   ·   "
+                             f"{counts['same']} unchanged   ·   {counts['skip']} skipped   ·   {counts['error']} with "
+                             f"problems", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(body, text=summary, style="Muted.TLabel", justify="left").pack(anchor="w", pady=(4, 8))
+        frame = ttk.Frame(body, style="Card.TFrame")
+        frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=("file", "client", "model", "version", "result"), show="headings")
+        for col, txt, w in (("file", "File", 240), ("client", "Client", 60), ("model", "Model code", 140),
+                            ("version", "Version", 70), ("result", "Result", 360)):
+            tree.heading(col, text=txt)
+            tree.column(col, width=w, anchor="w")
+        tree.tag_configure("error", foreground=C["err_text"])
+        tree.tag_configure("skip", foreground=C["warn"])
+        tree.tag_configure("same", foreground=C["muted"])
+        tree.tag_configure("new", foreground=C["ok_text"])
+        tree.tag_configure("update", foreground=C["accent_text"])
+        order = {"error": 0, "skip": 1, "new": 2, "update": 3, "same": 4}
+        for r in sorted(rows, key=lambda r: (order[r[5]], r[1].upper(), r[2].upper())):
+            tree.insert("", "end", values=r[:5], tags=(r[5],))
+        sb = ttk.Scrollbar(frame, command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        def do_import():
+            try:
+                self.models = cat.add_many(self.catalog_dir, self.models, items)
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror(APP_TITLE, f"Import failed: {e}", parent=win)
+                return
+            self.write_log(f"Catalog bulk import: {counts['new']} new, {counts['update']} updated "
+                           f"({FAMILIES[fam]['name']}{', ' + chip if chip else ''}; {settings})", "ok")
+            win.destroy()
+            on_done()
+
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        imp = ttk.Button(btns, text=f"Import {len(items)} models", style="Accent.TButton", command=do_import)
+        imp.pack(side="right", padx=6)
+        if not items:
+            imp.state(["disabled"])
+        win.grab_set()
+
+    def catalog_dialog(self):
+        """Manage the firmware catalog (add, bulk import, delete, import / export, folder)."""
+        win = tk.Toplevel(self)
+        win.title("Firmware catalog")
+        win.configure(bg=C["card"])
+        win.transient(self)
+        win.geometry("1180x540")
+        body = ttk.Frame(win, style="Card.TFrame", padding=14)
+        body.pack(fill="both", expand=True)
+
+        top = ttk.Frame(body, style="Card.TFrame")
+        top.pack(fill="x")
+        folder_lbl = ttk.Label(top, text="", style="Muted.TLabel")
+        folder_lbl.pack(side="left")
+
+        cols = (("model", "Model code", 150), ("client", "Client", 60), ("description", "Description", 200),
+                ("family", "Family", 80),
+                ("chip", "Chip", 100), ("version", "Version", 70), ("settings", "Settings", 190),
+                ("updated", "Updated", 90))
+        frame = ttk.Frame(body, style="Card.TFrame")
+        frame.pack(fill="both", expand=True, pady=10)
+        tree = ttk.Treeview(frame, columns=[c for c, _, _ in cols], show="headings")
+        for col, txt, w in cols:
+            tree.heading(col, text=txt)
+            tree.column(col, width=w, anchor="w")
+        sb = ttk.Scrollbar(frame, command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        def fill():
+            tree.delete(*tree.get_children())
+            for m in sorted(self.models, key=cat.sort_key):
+                tree.insert("", "end", iid=m.key, values=(m.model, m.client or "—", m.description, m.family,
+                                                          m.chip or "—",
+                                                          m.version, m.settings, m.updated))
+            folder_lbl.configure(text=f"{len(self.models)} models   ·   {self.catalog_dir}")
+            self._fill_model_list()
+            self._match_active_model()
+
+        def selected():
+            sel = tree.selection()
+            return cat.find(self.models, sel[0]) if sel else None
+
+        def guarded(fn):
+            def run():
+                try:
+                    fn()
+                except Exception as e:  # noqa: BLE001
+                    messagebox.showerror(APP_TITLE, str(e), parent=win)
+            return run
+
+        def current_setup():
+            """(family, chip, settings text, summary) from the main window, or None if invalid."""
+            fam = self.family
+            st = {k: v for k, v in self._current_settings().items() if k in cat.MODEL_SETTINGS[fam]}
+            if fam == "fortior":
+                opt = self._opt_bytes()
+                if opt is None:
+                    messagebox.showerror(APP_TITLE, "Option bytes must be 8 hex digits.", parent=win)
+                    return None
+                st["opt"] = opt.hex().upper()
+            chip = (self.target_var.get() or "ANY") if fam == "mm32" else ""
+            settings = cat.format_settings(st)
+            summary = (f"Family:  {FAMILIES[fam]['name']}" + (f"   ·   For chip: {chip}" if chip else "") +
+                       f"\nSettings:  {settings}")
+            return fam, chip, settings, summary
+
+        def add_current():
+            if not self.image:
+                messagebox.showwarning(APP_TITLE, "First set up the model in the main window: choose the chip family, "
+                                                  "load its firmware file and set the programmer settings (and "
+                                                  "'For chip' / option bytes). Then add it here.", parent=win)
+                return
+            setup = current_setup()
+            if not setup:
+                return
+            fam, chip, settings, summary = setup
+            summary += f"\nFile:  {os.path.basename(self.image[0])}"
+            # Pre-fill from a file named <client>_<model>_v<version>, else from the model on the programmer.
+            parsed = cat.parse_filename(self.image[0])
+            am = self.active_model if self.active_model and self.active_model.family == fam else None
+            if parsed:
+                client, code, ver = parsed
+                old = cat.find(self.models, code)
+                prefill = (code, client, old.description if old else "", ver)
+            else:
+                prefill = (am.model, am.client, am.description, am.version) if am else ()
+            form = self._model_form(win, "Add model to catalog", summary, *prefill)
+            if not form:
+                return
+            code, client, desc, ver = form
+            old = cat.find(self.models, code)
+            if old and not messagebox.askyesno(
+                    APP_TITLE, f"{old.model} is already in the catalog (v{old.version}, {old.family}).\n\n"
+                               f"Replace it with this setup (v{ver})?", parent=win):
+                return
+            m = cat.Model(model=code, client=client, description=desc, family=fam, chip=chip, version=ver,
+                          settings=settings)
+            self.models = cat.add(self.catalog_dir, self.models, m, self.image[0])
+            self.write_log(f"Catalog: {'updated' if old else 'added'} {code} v{ver} "
+                           f"({os.path.basename(self.image[0])})", "ok")
+            fill()
+            tree.selection_set(m.key)
+            tree.see(m.key)
+
+        def bulk_import():
+            setup = current_setup()
+            if not setup:
+                return
+            fam, chip, settings, summary = setup
+            if not messagebox.askokcancel(
+                    APP_TITLE, "Bulk import adds many models that use the SAME chip and settings:\n\n"
+                               f"{summary}\n\nThese are taken from the main window. If they are not right, press "
+                               "Cancel and set them there first.\n\nNext, select the firmware files. They must be "
+                               "named <client>_<model>_v<version>, e.g. wt_cf36_10001_v1.1.3.hex.", parent=win):
+                return
+            paths = filedialog.askopenfilenames(
+                parent=win, title=f"Firmware files for {FAMILIES[fam]['name']}" + (f" ({chip})" if chip else ""),
+                filetypes=[("Firmware", "*.hex *.ihx *.srec *.mot *.s19 *.s28 *.s37 *.bin"), ("All files", "*.*")])
+            if paths:
+                self._bulk_preview(win, list(paths), fam, chip, settings, summary, fill)
+
+        def delete():
+            m = selected()
+            if m and messagebox.askyesno(APP_TITLE, f"Delete {m.model} v{m.version} from the catalog?", parent=win):
+                self.models = cat.remove(self.catalog_dir, self.models, m)
+                self.write_log(f"Catalog: deleted {m.model}", "ok")
+                fill()
+
+        def load_selected():
+            m = selected()
+            if m:
+                self.select_model(m.model)
+
+        def do_export():
+            if not self.models:
+                messagebox.showinfo(APP_TITLE, "The catalog is empty.", parent=win)
+                return
+            path = filedialog.asksaveasfilename(parent=win, title="Export firmware catalog",
+                                                defaultextension=".zip", filetypes=[("Catalog", "*.zip")],
+                                                initialfile=f"firmware-catalog-{dt.date.today():%Y-%m-%d}.zip")
+            if path:
+                n = cat.export_zip(self.catalog_dir, self.models, path)
+                self.write_log(f"Catalog exported: {n} models -> {path}", "ok")
+                messagebox.showinfo(APP_TITLE, f"Exported {n} models to\n{path}\n\nCopy this file to the other PC "
+                                               f"and use Import there.", parent=win)
+
+        def do_import():
+            path = filedialog.askopenfilename(parent=win, title="Import firmware catalog",
+                                              filetypes=[("Catalog", "*.zip")])
+            if not path:
+                return
+            new, updated, same = cat.compare(self.models, cat.read_zip(path))
+            if not new and not updated:
+                messagebox.showinfo(APP_TITLE, f"Nothing new: all {len(same)} models are already in this catalog.",
+                                    parent=win)
+                return
+            lines = [f"{len(new)} new models"]
+            if updated:
+                lines.append(f"{len(updated)} models replaced: " + ", ".join(
+                    f"{m.model} v{cat.find(self.models, m.model).version} → v{m.version}" for m in updated[:8]) +
+                    (" …" if len(updated) > 8 else ""))
+            lines.append(f"{len(same)} unchanged")
+            if messagebox.askyesno(APP_TITLE, "Import this catalog?\n\n" + "\n".join(lines), parent=win):
+                self.models = cat.import_zip(self.catalog_dir, self.models, path)
+                self.write_log(f"Catalog imported from {os.path.basename(path)}: {len(new)} new, "
+                               f"{len(updated)} replaced", "ok")
+                fill()
+
+        def open_folder():
+            os.makedirs(self.catalog_dir, exist_ok=True)
+            os.startfile(self.catalog_dir)
+
+        def change_folder():
+            path = filedialog.askdirectory(parent=win, title="Firmware catalog folder", initialdir=self.catalog_dir)
+            if not path:
+                return
+            self.models = cat.load(path)
+            self.catalog_dir = os.path.normpath(path)
+            self.prefs["catalog_dir"] = self.catalog_dir
+            save_prefs(self.prefs)
+            self.write_log(f"Catalog folder: {self.catalog_dir} ({len(self.models)} models)", "ok")
+            fill()
+
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Add current setup…", style="Accent.TButton",
+                   command=guarded(add_current)).pack(side="left")
+        ttk.Button(btns, text="Bulk import…", command=guarded(bulk_import)).pack(side="left", padx=(6, 0))
+        ttk.Button(btns, text="Load selected", command=guarded(load_selected)).pack(side="left", padx=6)
+        ttk.Button(btns, text="Delete", command=guarded(delete)).pack(side="left")
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Change folder…", command=guarded(change_folder)).pack(side="right", padx=(0, 6))
+        ttk.Button(btns, text="Open folder", command=guarded(open_folder)).pack(side="right", padx=6)
+        ttk.Button(btns, text="Export .zip…", command=guarded(do_export)).pack(side="right")
+        ttk.Button(btns, text="Import .zip…", command=guarded(do_import)).pack(side="right", padx=6)
+        tree.bind("<Double-1>", lambda e: guarded(load_selected)())
+        fill()
 
     # ================================================================ chips dialog
     def chips_dialog(self):
@@ -1663,19 +2334,21 @@ class App(tk.Tk):
     def _on_result(self, line):
         parts = line.split(" ")
         img = self.dev_info.get("name", "")
+        am = self.active_model
+        model = [am.model, am.version] if am else ["", ""]
         if parts[2] == "PASS":
             ms, chip, devid = parts[3], parts[4], parts[5]
             self.prog["value"] = 100
             msg = f"{chip} programmed and verified in {int(ms) / 1000:.2f} s"
             self._set_banner("✓  PASS", msg, "ok")
             self.write_log(f"PASS  {msg}", "ok")
-            self._csv(["PASS", self.family, chip, devid, ms, "", img])
+            self._csv(["PASS", self.family, chip, devid, ms, "", img] + model)
         else:
             counted = parts[3] == "1"
             reason = " ".join(parts[4:])
             self._set_banner("✕  FAIL", reason + ("" if counted else "   (not counted)"), "err")
             self.write_log(f"FAIL  {reason}" + ("" if counted else "  (not counted)"), "err")
-            self._csv(["FAIL" if counted else "NO-TARGET", self.family, "", "", "", reason, img])
+            self._csv(["FAIL" if counted else "NO-TARGET", self.family, "", "", "", reason, img] + model)
             m = re.search(r"Unknown chip ID (0x[0-9A-Fa-f]{8})", reason)
             if m:
                 self.after(100, self._ask_identify, m.group(1))
@@ -1744,12 +2417,18 @@ class App(tk.Tk):
         win.grab_set()
 
     def _csv(self, row):
+        header = ["timestamp", "result", "family", "chip", "chip_id", "ms", "message", "image", "model", "version"]
         try:
+            if os.path.exists(LOG_CSV):
+                with open(LOG_CSV, "r", newline="") as f:
+                    old = next(csv.reader(f), [])
+                if old != header:  # log from an older UI: keep it under another name
+                    os.replace(LOG_CSV, LOG_CSV.replace(".csv", f"_until_{dt.date.today():%Y%m%d}.csv"))
             new = not os.path.exists(LOG_CSV)
             with open(LOG_CSV, "a", newline="") as f:
                 w = csv.writer(f)
                 if new:
-                    w.writerow(["timestamp", "result", "family", "chip", "chip_id", "ms", "message", "image"])
+                    w.writerow(header)
                 w.writerow([dt.datetime.now().isoformat(timespec="seconds")] + row)
         except OSError as e:
             self.write_log(f"Cannot write {LOG_CSV}: {e}", "err")
