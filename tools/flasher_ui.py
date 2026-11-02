@@ -1,7 +1,7 @@
-"""Offline Programmer - desktop UI (MM32 over SWD, Fortior FU68xx over FICE).
+"""Offline Programmer - desktop UI (MM32 and Renesas RA2E1 over SWD, Fortior FU68xx over FICE).
 
 Talks to the ESP8266 programmer over UART. Selects the chip family, loads an
-Intel HEX / BIN file, uploads it to the programmer's flash, configures the
+Intel HEX / S-record / BIN file, uploads it to the programmer's flash, configures the
 programmer, and shows live pass/fail counters.
 
 Requires: Python 3.8+, pyserial  (pip install pyserial)
@@ -31,12 +31,14 @@ LOG_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flash_log.cs
 # programmer settings; mode, verify, run and settle are common to all.
 FAMILIES = {
     "mm32": {"label": "MM32  ·  SWD", "name": "MM32", "iface": "SWD", "settings": ("erase", "protect", "swdelay")},
-    "fortior": {"label": "Fortior FU68xx  ·  FICE", "name": "Fortior FU68xx", "iface": "FICE",
+    "fortior": {"label": "Fortior  ·  FICE", "name": "Fortior FU68xx", "iface": "FICE",
                 "settings": ("speed",)},
+    "renesas": {"label": "Renesas RA  ·  SWD", "name": "Renesas RA2E1", "iface": "SWD",
+                "settings": ("erase", "reset", "swdelay")},
 }
 COMMON_SETTINGS = ("mode", "verify", "run", "settle")
 SETTING_DEFAULTS = {"mode": "button", "verify": "1", "run": "1", "settle": "500", "erase": "chip", "protect": "0",
-                    "swdelay": "0", "speed": "100"}
+                    "swdelay": "0", "speed": "100", "reset": "1"}
 
 # MM32
 FLASH_BASE = 0x08000000
@@ -49,6 +51,11 @@ OPT_DEFAULT = "00F000FF"
 LVR_CHOICES = [("3.8 V", 0xC0), ("3.0 V", 0x80)]  # values verified against Keil captures
 LVR_MASK = 0xC0
 WDT_BIT = 0x20
+
+# Renesas RA2E1 memory map (R7FA2E1A9 / A7 / A5: 128 / 64 / 32 KB code flash)
+RA_CF_BASE, RA_CF_MAX = 0x00000000, 128 * 1024
+RA_DF_BASE, RA_DF_SIZE = 0x40100000, 4 * 1024
+RA_EXTRA_BASE, RA_EXTRA_END = 0x01010000, 0x01010040  # option-setting extra area: ID code, access window
 
 
 def crc16_ccitt(data, crc=0xFFFF):
@@ -68,8 +75,8 @@ def chip_crc(data, opt):
 
 # --------------------------------------------------------------------------- image loading
 
-def parse_intel_hex(text, fill=0xFF):
-    """Return (base_address, bytearray) for an Intel HEX file; gaps are filled with `fill`."""
+def intel_hex_mem(text):
+    """Return {address: byte} for an Intel HEX file."""
     mem = {}
     upper = 0
     for ln, line in enumerate(text.splitlines(), 1):
@@ -98,6 +105,12 @@ def parse_intel_hex(text, fill=0xFF):
         elif rtype == 0x04:
             upper = ((data[0] << 8) | data[1]) << 16
         # 0x03 / 0x05 (start address) are irrelevant for programming
+    return mem
+
+
+def parse_intel_hex(text, fill=0xFF):
+    """Return (base_address, bytearray) for an Intel HEX file; gaps are filled with `fill`."""
+    mem = intel_hex_mem(text)
     if not mem:
         raise ValueError("no data records in file")
     lo, hi = min(mem), max(mem) + 1
@@ -107,10 +120,96 @@ def parse_intel_hex(text, fill=0xFF):
     return lo, buf
 
 
+def parse_srec(text):
+    """Return {address: byte} for a Motorola S-record file (e2 studio .srec / .mot)."""
+    mem = {}
+    addr_len = {"1": 2, "2": 3, "3": 4}
+    for ln, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        if line[0] != "S" or len(line) < 4:
+            raise ValueError(f"line {ln}: not an S-record")
+        kind = line[1]
+        try:
+            rec = bytes.fromhex(line[2:])
+        except ValueError:
+            raise ValueError(f"line {ln}: invalid hex characters")
+        if len(rec) != rec[0] + 1:
+            raise ValueError(f"line {ln}: bad record length")
+        if (sum(rec) & 0xFF) != 0xFF:
+            raise ValueError(f"line {ln}: checksum error")
+        if kind in addr_len:
+            n = addr_len[kind]
+            base = int.from_bytes(rec[1:1 + n], "big")
+            for i, b in enumerate(rec[1 + n:-1]):
+                mem[base + i] = b
+        elif kind in "789":
+            break
+        # S0 header, S5/S6 counts: nothing to program
+    return mem
+
+
 def load_image(path, family):
-    """Load .hex or .bin for a chip family. Returns (base, bytes)."""
+    """Load an image for a chip family. Returns (base, bytes, layout); layout is {} except for Renesas."""
+    if family == "renesas":
+        return load_ra_image(path)
     loader = load_fu68_image if family == "fortior" else load_mm32_image
-    return loader(path)
+    return loader(path) + ({},)
+
+
+def load_ra_image(path):
+    """Renesas RA2E1: code flash bytes from 0x0, then data flash bytes from 0x40100000; gaps are 0xFF.
+    Returns (0, bytes, {"cf": n, "df": n})."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if path.lower().endswith(".bin"):
+        mem = {RA_CF_BASE + i: b for i, b in enumerate(raw)}
+    elif raw.lstrip()[:1] == b":":
+        mem = intel_hex_mem(raw.decode("ascii", errors="replace"))
+    elif raw.lstrip()[:1] == b"S":
+        mem = parse_srec(raw.decode("ascii", errors="replace"))
+    else:
+        raise ValueError("not an Intel HEX, S-record or .bin file")
+    if not mem:
+        raise ValueError("no data records in file")
+    cf, df, extra, other = {}, {}, {}, []
+    for a, b in mem.items():
+        if RA_CF_BASE <= a < RA_CF_BASE + RA_CF_MAX:
+            cf[a - RA_CF_BASE] = b
+        elif RA_DF_BASE <= a < RA_DF_BASE + RA_DF_SIZE:
+            df[a - RA_DF_BASE] = b
+        elif RA_EXTRA_BASE <= a < RA_EXTRA_END:
+            extra[a] = b
+        else:
+            other.append(a)
+    if other:
+        raise ValueError(f"data at 0x{min(other):08X}-0x{max(other):08X} is outside the RA2E1 code flash "
+                         f"(0x00000000), data flash (0x40100000) and option area")
+    custom = sorted(a for a, b in extra.items() if b != 0xFF)
+    if custom:
+        raise ValueError(f"the file sets the ID code / access window at 0x{custom[0]:08X} (option-setting extra "
+                         f"area). This programmer only supports the default (all 0xFF, unlocked) setting.")
+
+    def blob(m, align):
+        if not m:
+            return b""
+        size = max(m) + 1
+        size += -size % align
+        buf = bytearray(b"\xff" * size)
+        for off, b in m.items():
+            buf[off] = b
+        return bytes(buf)
+
+    cf_blob, df_blob = blob(cf, 4), blob(df, 1)
+    return 0, cf_blob + df_blob, {"cf": len(cf_blob), "df": len(df_blob)}
+
+
+def describe_ra_layout(layout):
+    parts = [f"code flash {layout['cf']:,} B" if layout["cf"] else "no code flash data"]
+    if layout["df"]:
+        parts.append(f"data flash {layout['df']:,} B")
+    return "   ·   ".join(parts)
 
 
 def load_mm32_image(path):
@@ -328,6 +427,7 @@ class App(tk.Tk):
         if self.family not in FAMILIES:
             self.family = "mm32"
         self.image = None          # (path, base, data, crc), loaded for self.family
+        self.image_layout = {}     # Renesas: {"cf": code flash bytes, "df": data flash bytes} of self.image
         self.chips = []
         self.dev_info = {}
         self.last_detect = None
@@ -543,7 +643,7 @@ class App(tk.Tk):
         self.family_var = tk.StringVar(value=self.family)
         self.family_btns = []
         for key, fam in FAMILIES.items():
-            btn = ttk.Radiobutton(row, text=fam["label"], value=key, variable=self.family_var, width=22,
+            btn = ttk.Radiobutton(row, text=fam["label"], value=key, variable=self.family_var,
                                   style="Seg.Toolbutton", command=self.pick_family)
             btn.pack(side="left")
             self.family_btns.append(btn)
@@ -654,20 +754,24 @@ class App(tk.Tk):
         b = card.body
         b.columnconfigure(1, weight=1)
 
-        # Rows that only apply to one family: family -> widgets to grid / grid_remove.
+        # Rows that only apply to some families: family -> widgets to grid / grid_remove.
+        # `family` is one family key or a tuple of them.
         self.family_rows = {key: [] for key in FAMILIES}
+
+        def owners(family):
+            return (family,) if isinstance(family, str) else family or ()
 
         def label(row, text, family=None):
             lbl = ttk.Label(b, text=text, style="Card.TLabel")
             lbl.grid(row=row, column=0, sticky="w", padx=(0, 18), pady=3)
-            if family:
-                self.family_rows[family].append(lbl)
+            for fam in owners(family):
+                self.family_rows[fam].append(lbl)
 
         def cell(row, family=None):
             f = ttk.Frame(b, style="Card.TFrame")
             f.grid(row=row, column=1, sticky="w", pady=3)
-            if family:
-                self.family_rows[family].append(f)
+            for fam in owners(family):
+                self.family_rows[fam].append(f)
             return f
 
         def seg(row, text, var, options, family=None):
@@ -681,6 +785,7 @@ class App(tk.Tk):
         self.erase_var = tk.StringVar(value="chip")
         seg(0, "Start flashing by", self.mode_var, [("button", "Button press"), ("auto", "Auto-detect board")])
         seg(1, "Erase", self.erase_var, [("chip", "Full chip"), ("pages", "Only image pages")], "mm32")
+        seg(1, "Erase", self.erase_var, [("chip", "Full chip"), ("blocks", "Only image blocks")], "renesas")
 
         label(2, "After programming")
         checks = cell(2)
@@ -695,6 +800,9 @@ class App(tk.Tk):
         self.protect_chk = self._track(ttk.Checkbutton(checks, text="Read-protect", variable=self.protect_var,
                                                        style="Card.TCheckbutton"))
         self.protect_chk.pack(side="left", padx=(0, 16))
+        self.reset_var = tk.BooleanVar(value=True)
+        self.reset_chk = self._track(ttk.Checkbutton(checks, text="Use RES pin", variable=self.reset_var,
+                                                     style="Card.TCheckbutton"))
 
         def number(row, text, var, lo, hi, step, hint, family=None):
             label(row, text, family)
@@ -706,7 +814,8 @@ class App(tk.Tk):
         self.swdelay_var = tk.StringVar(value="0")
         self.speed_var = tk.StringVar(value="100")
         self.settle_var = tk.StringVar(value="500")
-        number(3, "SWD clock delay", self.swdelay_var, 0, 250, 1, "0 = fastest; raise for long wires", "mm32")
+        number(3, "SWD clock delay", self.swdelay_var, 0, 250, 1, "0 = fastest; raise for long wires",
+               ("mm32", "renesas"))
         number(3, "FICE timing", self.speed_var, 50, 1000, 10, "% of emulator timing; raise (e.g. 200) for long wires",
                "fortior")
         number(4, "Auto-detect settle", self.settle_var, 0, 10000, 100, "ms to wait after a board is detected")
@@ -724,7 +833,7 @@ class App(tk.Tk):
         self._saved_settings = None
         self.setting_vars = {"mode": self.mode_var, "verify": self.verify_var, "run": self.run_var,
                              "settle": self.settle_var, "erase": self.erase_var, "protect": self.protect_var,
-                             "swdelay": self.swdelay_var, "speed": self.speed_var}
+                             "swdelay": self.swdelay_var, "speed": self.speed_var, "reset": self.reset_var}
         for var in self.setting_vars.values():
             var.trace_add("write", lambda *a: self._update_settings_state())
 
@@ -784,7 +893,7 @@ class App(tk.Tk):
             items = [("Detect chip", self.detect), ("Reset target", self.reset_target),
                      ("Chip table…", self.chips_dialog), ("Erase chip", self.erase_chip),
                      ("Unlock (remove RDP)", self.unlock)]
-        else:
+        else:  # Fortior, Renesas
             items = [("Detect chip", self.detect), ("Reset & run target", self.reset_target),
                      ("Erase chip", self.erase_chip)]
         self.tool_btns = []
@@ -920,27 +1029,33 @@ class App(tk.Tk):
         f = FAMILIES[fam]
         self.header_sub.configure(text=f"{f['name']}  ·  {f['iface']} production flasher  ·  ESP8266")
         mm32 = fam == "mm32"
+        self.opt_row.pack_forget()
+        self.crc_lbl.pack_forget()
+        self.target_box.pack_forget()
         if mm32:
-            self.opt_row.pack_forget()
-            self.crc_lbl.pack_forget()
             self.target_box.pack(side="left")
             self.img_lbl.configure(text="Intel HEX (.hex) or binary (.bin) from Keil")
-        else:
+        elif fam == "fortior":
             self.opt_row.pack(fill="x", pady=(0, 8), before=self.upload_row)
-            self.target_box.pack_forget()
             self.crc_lbl.pack(side="left")
             self.img_lbl.configure(text="Intel HEX (.hex) from Keil (C51)")
-        for key, widgets in self.family_rows.items():
+        else:
+            self.img_lbl.configure(text="S-record (.srec / .mot) or Intel HEX (.hex) from e2 studio")
+        # A row can belong to several families: show it if the active family owns it.
+        shown = set(self.family_rows[fam])
+        for widgets in self.family_rows.values():
             for w in widgets:
-                if key == fam:
+                if w in shown:
                     w.grid()
                 else:
                     w.grid_remove()
+        self.protect_chk.pack_forget()
+        self.reset_chk.pack_forget()
         if mm32:
             self.protect_chk.pack(side="left", padx=(0, 16))
-        else:
-            self.protect_chk.pack_forget()
-        self.verify_chk.configure(text="Verify" if mm32 else "Verify (chip CRC)")
+        elif fam == "renesas":
+            self.reset_chk.pack(side="left", padx=(0, 16))
+        self.verify_chk.configure(text="Verify (chip CRC)" if fam == "fortior" else "Verify")
         self._build_tool_buttons()
 
         # The selected file belongs to a family; load this family's last one.
@@ -1072,6 +1187,10 @@ class App(tk.Tk):
             if self.family == "mm32":
                 what = f"{size} @ {info.get('base')}   ·   CRC {info.get('crc')}   ·   for {info.get('target')}"
                 log = f"{size}, CRC {info.get('crc')}, for {info.get('target')}"
+            elif self.family == "renesas":
+                layout = describe_ra_layout({"cf": int(info.get("cf", 0)), "df": int(info.get("df", 0))})
+                what = f"{size}   ·   {layout}   ·   CRC {info.get('crc')}"
+                log = f"{size}, {layout}, CRC {info.get('crc')}"
             else:
                 what = f"{size}   ·   options {info.get('opt')}   ·   chip CRC {info.get('chipcrc')}"
                 log = f"{size}, options {info.get('opt')}, chip CRC {info.get('chipcrc')}"
@@ -1142,22 +1261,25 @@ class App(tk.Tk):
         start = os.path.dirname(self.prefs.get("last_file", "")) or None
         path = filedialog.askopenfilename(
             title="Select firmware", initialdir=start,
-            filetypes=[("Firmware", "*.hex *.ihx *.bin"), ("All files", "*.*")])
+            filetypes=[("Firmware", "*.hex *.ihx *.srec *.mot *.s19 *.s28 *.s37 *.bin"), ("All files", "*.*")])
         if path:
             self._load_file(path)
 
     def _load_file(self, path, quiet=False):
         try:
-            base, data = load_image(path, self.family)
+            base, data, layout = load_image(path, self.family)
         except Exception as e:
             if not quiet:
                 messagebox.showerror(APP_TITLE, f"Cannot load image for {FAMILIES[self.family]['name']}:\n{e}")
             return
         crc = zlib.crc32(data)
         self.image = (path, base, data, crc)
+        self.image_layout = layout
         self.path_var.set(os.path.basename(path))
         if self.family == "mm32":
             span = f"0x{base:08X} – 0x{base + len(data) - 1:08X}"
+        elif self.family == "renesas":
+            span = describe_ra_layout(layout)
         else:
             span = f"0x0000 – 0x{len(data) - 1:04X}"
         self.img_lbl.configure(text=f"{len(data):,} bytes   ·   {span}   ·   CRC 0x{crc:08X}   ·   "
@@ -1186,6 +1308,8 @@ class App(tk.Tk):
                 return
             self.prefs["target"] = target
             fields = f"0x{base:08X} {target}"
+        elif self.family == "renesas":
+            fields = f"{self.image_layout['cf']} {self.image_layout['df']}"
         else:
             opt = self._opt_bytes()
             if opt is None:
@@ -1205,7 +1329,8 @@ class App(tk.Tk):
         self.run_bg("Upload", self._upload_worker, path, data, fields)
 
     def _upload_worker(self, path, data, fields):
-        """fields: the family part of BEGIN (MM32 "<base> <target>", Fortior "<option bytes>")."""
+        """fields: the family part of BEGIN (MM32 "<base> <target>", Fortior "<option bytes>",
+        Renesas "<code flash bytes> <data flash bytes>")."""
         name = os.path.basename(path).replace(" ", "_")[:40]
         crc = zlib.crc32(data)
         self.link.request(f"BEGIN {len(data)} 0x{crc:08X} {fields} {name}")
@@ -1313,6 +1438,15 @@ class App(tk.Tk):
     def detect(self):
         def work():
             info = parse_kv(self.link.request("DETECT", timeout=10))
+            if "part" in info:  # Renesas
+                known = info.get("part") != "UNKNOWN"
+                msg = (f"{info.get('part')}  ·  {info.get('flash')} KB code flash  ·  UID {info.get('uid')}  ·  "
+                       f"SWD delay {info.get('swdelay')}  ·  via RES: {'yes' if info.get('reset') == '1' else 'no'}")
+                self.ui_q.put(("log", (f"Detected {msg}  (access window {info.get('aws')}-{info.get('awe')})",
+                                       "ok" if known else "err")))
+                self.call(self._set_banner, "Chip detected" if known else "Unknown part number", msg,
+                          "ok" if known else "err")
+                return
             if "devid" not in info:  # Fortior
                 msg = f"{info.get('chip')}  ·  ID {info.get('id')}  ·  FICE timing {info.get('speed')}%"
                 self.ui_q.put(("log", (f"Detected {msg}", "ok")))
@@ -1334,12 +1468,13 @@ class App(tk.Tk):
         def work():
             self.link.request("RESET", timeout=10)
             self.ui_q.put(("log", ("Target reset" if self.family == "mm32" else
-                                   "Target reset and released — the firmware runs", "ok")))
+                                   "Target reset and released — the firmware runs", "ok")))  # Fortior, Renesas
         self.run_bg("Reset", work)
 
     def erase_chip(self):
-        question = ("Mass-erase the connected target?" if self.family == "mm32" else
-                    "Erase the whole flash of the connected target?")
+        question = {"mm32": "Mass-erase the connected target?",
+                    "renesas": "Erase the whole code flash and data flash of the connected target?"}.get(
+            self.family, "Erase the whole flash of the connected target?")
         if messagebox.askyesno(APP_TITLE, question):
             def work():
                 self.link.request("ERASE", timeout=15)

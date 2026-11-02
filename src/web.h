@@ -4,7 +4,7 @@
 //   POST /api/cmd     c=<command line>   -> "@OK <CMD> ..." / "@ERR <CMD> ..."
 //   GET  /api/events  ?since=<seq>       -> "<seq> <busy>\n" then the "@EVT ..." lines after <seq>
 //   POST /api/upload  ?size&crc&fields&name, multipart file -> the END reply
-//                     (fields = the family part of BEGIN: "<base> <target>" or "<option bytes>")
+//                     (fields = the family part of BEGIN: "<base> <target>", "<option bytes>" or "<cf> <df>")
 #include <Arduino.h>
 
 #ifndef WIFI_AP_SSID

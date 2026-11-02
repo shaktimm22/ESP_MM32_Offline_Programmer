@@ -38,12 +38,15 @@ header .sub { color: var(--header-muted); font-size: 12px; }
 .hint b { color: var(--accent-text); font-size: 18px; }
 .hint[hidden] { display: none; }
 
-/* chip family selector; elements tagged mm32-only / fortior-only follow the active family */
+/* chip family selector; elements tagged mm32-only / fortior-only / renesas-only follow the active family,
+   swd-only = MM32 and Renesas (not Fortior), not-mm32 = Fortior and Renesas */
 .family { background: var(--card); border-bottom: 1px solid var(--border); padding: 8px 18px; display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
 .family .lbl { font-weight: 700; }
 .family .seg span { min-width: 190px; }
 @media (max-width: 520px) { .family .seg span { min-width: 0; } }
-body[data-family=mm32] .fortior-only, body[data-family=fortior] .mm32-only { display: none !important; }
+body:not([data-family=mm32]) .mm32-only, body:not([data-family=fortior]) .fortior-only,
+body:not([data-family=renesas]) .renesas-only, body[data-family=fortior] .swd-only,
+body[data-family=mm32] .not-mm32 { display: none !important; }
 #opt { width: 90px; font-family: var(--mono); }
 
 /* layout */
@@ -182,6 +185,7 @@ tbody tr.sel { background: var(--accent); color: #fff; }
   <div class="seg">
     <label><input type="radio" name="family" value="mm32" class="conn-only"><span>MM32 (SWD)</span></label>
     <label><input type="radio" name="family" value="fortior" class="conn-only"><span>Fortior FU68xx (FICE)</span></label>
+    <label><input type="radio" name="family" value="renesas" class="conn-only"><span>Renesas RA2E1 (SWD)</span></label>
   </div>
   <span class="muted">Switches the programmer immediately. Each family keeps its own stored firmware.</span>
 </div>
@@ -233,10 +237,11 @@ tbody tr.sel { background: var(--accent); color: #fff; }
           <label><input type="radio" name="mode" value="button" class="conn-only"><span>Button press</span></label>
           <label><input type="radio" name="mode" value="auto" class="conn-only"><span>Auto-detect board</span></label>
         </div>
-        <span class="lbl mm32-only">Erase</span>
-        <div class="seg mm32-only">
+        <span class="lbl swd-only">Erase</span>
+        <div class="seg swd-only">
           <label><input type="radio" name="erase" value="chip" class="conn-only"><span>Full chip</span></label>
-          <label><input type="radio" name="erase" value="pages" class="conn-only"><span>Only image pages</span></label>
+          <label class="mm32-only"><input type="radio" name="erase" value="pages" class="conn-only"><span>Only image pages</span></label>
+          <label class="renesas-only"><input type="radio" name="erase" value="blocks" class="conn-only"><span>Only image blocks</span></label>
         </div>
         <span class="lbl">After programming</span>
         <div class="checks">
@@ -244,8 +249,12 @@ tbody tr.sel { background: var(--accent); color: #fff; }
           <label><input type="checkbox" id="run" class="conn-only">Run firmware</label>
           <label class="mm32-only"><input type="checkbox" id="protect" class="conn-only">Read-protect</label>
         </div>
-        <span class="lbl mm32-only">SWD clock delay</span>
-        <div class="row mm32-only"><input type="number" id="swdelay" min="0" max="250" step="1" class="conn-only">
+        <span class="lbl renesas-only">Reset line (RES)</span>
+        <div class="checks renesas-only">
+          <label><input type="checkbox" id="reset" class="conn-only">Use RES (connect under reset)</label>
+        </div>
+        <span class="lbl swd-only">SWD clock delay</span>
+        <div class="row swd-only"><input type="number" id="swdelay" min="0" max="250" step="1" class="conn-only">
           <span class="muted">0 = fastest; raise for long wires</span></div>
         <span class="lbl fortior-only">FICE timing</span>
         <div class="row fortior-only"><input type="number" id="speed" min="50" max="1000" step="10" class="conn-only">
@@ -288,7 +297,7 @@ tbody tr.sel { background: var(--accent); color: #fff; }
       <div class="card-head"><h2>Target tools</h2></div>
       <div class="card-body tools">
         <button class="btn conn-only" id="detectBtn">Detect chip</button>
-        <button class="btn conn-only" id="resetBtn"><span class="mm32-only">Reset target</span><span class="fortior-only">Reset &amp; run target</span></button>
+        <button class="btn conn-only" id="resetBtn"><span class="mm32-only">Reset target</span><span class="not-mm32">Reset &amp; run target</span></button>
         <button class="btn conn-only mm32-only" id="chipsBtn">Chip table…</button>
         <button class="btn conn-only" id="eraseBtn">Erase chip</button>
         <button class="btn conn-only mm32-only" id="unlockBtn">Unlock (remove RDP)</button>
@@ -343,11 +352,21 @@ const FU_OPT_ADDR = 0x3FFC;               // Keil appends 4 option bytes here
 const OPT_DEFAULT = "00F000FF";           // option bytes as Keil writes them; byte 1 bits 7:6 = LVR, byte 2 bit 5 = WDT
 const LVR_CHOICES = [["3.8 V", 0xC0], ["3.0 V", 0x80]];
 const LVR_MASK = 0xC0, WDT_BIT = 0x20;
+// Renesas RA2E1 memory map (R7FA2E1A9 / A7 / A5: 128 / 64 / 32 KB code flash)
+const RA_CF_BASE = 0x00000000, RA_CF_MAX = 128 * 1024;
+const RA_DF_BASE = 0x40100000, RA_DF_SIZE = 4 * 1024;
+const RA_EXTRA_BASE = 0x01010000, RA_EXTRA_END = 0x01010040;  // option-setting extra area: ID code (OSIS), access window
 const FAMILIES = {
   mm32: { name: "MM32", sub: "MM32 · SWD", verify: "Verifying",
-          erase: "Mass-erase the connected target?" },
+          erase: "Mass-erase the connected target?", eraseMs: 20000,
+          accept: ".hex,.ihx,.bin", files: "Intel HEX (.hex) or binary (.bin) from Keil", fileShort: "a .hex file" },
   fortior: { name: "Fortior FU68xx", sub: "Fortior FU68xx · FICE", verify: "Verifying (CRC)",
-             erase: "Erase the whole flash of the connected target?" },
+             erase: "Erase the whole flash of the connected target?", eraseMs: 20000,
+             accept: ".hex,.ihx,.bin", files: "Intel HEX (.hex) or binary (.bin) from Keil", fileShort: "a .hex file" },
+  renesas: { name: "Renesas RA2E1", sub: "Renesas RA2E1 · SWD", verify: "Verifying",
+             erase: "Erase the whole code flash and data flash of the connected target?", eraseMs: 30000,
+             accept: ".hex,.srec,.mot,.s19,.s28,.s37,.bin", files: "Intel HEX (.hex) or S-record (.srec / .mot) from e2 studio",
+             fileShort: "a .hex / .srec file" },
 };
 const STATE_TEXT = { connect: "Connecting to target", erase: "Erasing", program: "Programming",
                      protect: "Setting read protection" };
@@ -363,7 +382,15 @@ const store = {  // localStorage may be unavailable (private mode, captive-porta
 };
 
 // ------------------------------------------------------------------ image loading
-function parseIntelHex(text, fill = 0xff) {
+function hexBytes(body, ln) {
+  if (body.length % 2 || /[^0-9a-f]/i.test(body)) throw new Error(`line ${ln}: invalid hex characters`);
+  const rec = new Uint8Array(body.length / 2);
+  for (let i = 0; i < rec.length; i++) rec[i] = parseInt(body.substr(i * 2, 2), 16);
+  return rec;
+}
+
+// Intel HEX -> Map(address -> byte)
+function parseIntelHexMem(text) {
   const mem = new Map();
   let upper = 0, ln = 0;
   for (let line of text.split(/\r?\n/)) {
@@ -371,10 +398,7 @@ function parseIntelHex(text, fill = 0xff) {
     line = line.trim();
     if (!line) continue;
     if (line[0] !== ":") throw new Error(`line ${ln}: missing ':'`);
-    const body = line.slice(1);
-    if (body.length % 2 || /[^0-9a-f]/i.test(body)) throw new Error(`line ${ln}: invalid hex characters`);
-    const rec = new Uint8Array(body.length / 2);
-    for (let i = 0; i < rec.length; i++) rec[i] = parseInt(body.substr(i * 2, 2), 16);
+    const rec = hexBytes(line.slice(1), ln);
     if (rec.length < 5 || rec.length !== rec[0] + 5) throw new Error(`line ${ln}: bad record length`);
     if (rec.reduce((a, b) => a + b, 0) & 0xff) throw new Error(`line ${ln}: checksum error`);
     const addr = (rec[1] << 8) | rec[2], type = rec[3], data = rec.subarray(4, 4 + rec[0]);
@@ -383,6 +407,12 @@ function parseIntelHex(text, fill = 0xff) {
     else if (type === 2) upper = ((data[0] << 8) | data[1]) << 4;
     else if (type === 4) upper = ((data[0] << 8) | data[1]) * 65536;
   }
+  return mem;
+}
+
+// Intel HEX -> one contiguous block { base, data } from the lowest to the highest address, gaps = `fill`.
+function parseIntelHex(text, fill = 0xff) {
+  const mem = parseIntelHexMem(text);
   if (!mem.size) throw new Error("no data records in file");
   let lo = Infinity, hi = -Infinity;
   for (const a of mem.keys()) { if (a < lo) lo = a; if (a > hi) hi = a; }
@@ -391,8 +421,31 @@ function parseIntelHex(text, fill = 0xff) {
   return { base: lo, data: buf };
 }
 
-// Parse a picked file for a chip family. Returns { base, data }.
+// Motorola S-record (e2 studio .srec / .mot) -> Map(address -> byte)
+function parseSrec(text) {
+  const mem = new Map(), addrLen = { 1: 2, 2: 3, 3: 4 };
+  let ln = 0;
+  for (let line of text.split(/\r?\n/)) {
+    ln++;
+    line = line.trim();
+    if (!line) continue;
+    if (line[0] !== "S" || line.length < 4) throw new Error(`line ${ln}: not an S-record`);
+    const kind = line[1], rec = hexBytes(line.slice(2), ln);
+    if (rec.length !== rec[0] + 1) throw new Error(`line ${ln}: bad record length`);
+    if ((rec.reduce((a, b) => a + b, 0) & 0xff) !== 0xff) throw new Error(`line ${ln}: checksum error`);
+    if (addrLen[kind]) {
+      const n = addrLen[kind];
+      let base = 0;
+      for (let i = 1; i <= n; i++) base = base * 256 + rec[i];
+      rec.subarray(1 + n, rec.length - 1).forEach((b, i) => mem.set(base + i, b));
+    } else if ("789".includes(kind)) break;
+  }
+  return mem;
+}
+
+// Parse a picked file for a chip family. Returns { base, data } (Renesas also { cf, df, extra }).
 function loadImage(name, bytes, family) {
+  if (family === "renesas") return loadImageRenesas(name, bytes);
   return family === "fortior" ? loadImageFortior(name, bytes) : loadImageMm32(name, bytes);
 }
 
@@ -424,6 +477,53 @@ function loadImageFortior(name, bytes) {
   const out = new Uint8Array(end);
   out.set(data.subarray(0, n), base);
   return { base: 0, data: out };
+}
+
+// RA2E1: code flash from address 0 (padded to a multiple of 4), then data flash from 0x40100000; gaps 0xFF.
+// The option-setting extra area may only hold the default (all 0xFF). The upload is cf bytes then df bytes.
+function loadImageRenesas(name, bytes) {
+  const first = String.fromCharCode(bytes.find((b) => b > 0x20) || 0);
+  let mem;
+  if (/\.bin$/i.test(name)) { mem = new Map(); bytes.forEach((b, i) => mem.set(RA_CF_BASE + i, b)); }
+  else if (first === ":") mem = parseIntelHexMem(new TextDecoder("ascii").decode(bytes));
+  else if (first === "S") mem = parseSrec(new TextDecoder("ascii").decode(bytes));
+  else throw new Error("not an Intel HEX, S-record or .bin file");
+  if (!mem.size) throw new Error("no data records in file");
+
+  const cf = new Map(), df = new Map();
+  let extra = 0, custom = null, otherLo = Infinity, otherHi = -Infinity;
+  for (const [a, b] of mem) {
+    if (a >= RA_CF_BASE && a < RA_CF_BASE + RA_CF_MAX) cf.set(a - RA_CF_BASE, b);
+    else if (a >= RA_DF_BASE && a < RA_DF_BASE + RA_DF_SIZE) df.set(a - RA_DF_BASE, b);
+    else if (a >= RA_EXTRA_BASE && a < RA_EXTRA_END) { extra++; if (b !== 0xff && (custom === null || a < custom)) custom = a; }
+    else { otherLo = Math.min(otherLo, a); otherHi = Math.max(otherHi, a); }
+  }
+  if (otherHi >= 0)
+    throw new Error(`data at ${hex8(otherLo)}-${hex8(otherHi)} is outside the RA2E1 code flash (0x00000000), data flash (0x40100000) and option area`);
+  if (custom !== null)
+    throw new Error(`the file sets the ID code / access window at ${hex8(custom)} (option-setting extra area). This programmer only supports the default (all 0xFF, unlocked) setting.`);
+
+  const blob = (m, align) => {
+    if (!m.size) return new Uint8Array(0);
+    let size = 0;
+    for (const off of m.keys()) size = Math.max(size, off + 1);
+    size += (align - (size % align)) % align;
+    const buf = new Uint8Array(size).fill(0xff);
+    for (const [off, b] of m) buf[off] = b;
+    return buf;
+  };
+  const cfb = blob(cf, 4), dfb = blob(df, 1);
+  const data = new Uint8Array(cfb.length + dfb.length);
+  data.set(cfb);
+  data.set(dfb, cfb.length);
+  return { base: RA_CF_BASE, data, cf: cfb, df: dfb, extra };
+}
+
+function describeRenesasImage(im) {
+  const parts = [im.cf.length ? `Code flash ${fmtInt(im.cf.length)} B (0x00000000-${hex8(im.cf.length - 1)})` : "No code flash data"];
+  if (im.df.length) parts.push(`Data flash ${fmtInt(im.df.length)} B`);
+  if (im.extra) parts.push("ID code unlocked");
+  return parts.join("   ·   ");
 }
 
 // CRC-16/CCITT-FALSE, the algorithm of the FU68xx CRC unit Keil uses for verify.
@@ -602,6 +702,8 @@ async function refreshDevice() {
 function setFamily(fam) {
   document.body.dataset.family = fam;
   $("subFamily").textContent = FAMILIES[fam].sub;
+  $("file").accept = FAMILIES[fam].accept;
+  if (!S.file) $("fileDetail").textContent = FAMILIES[fam].files;
   syncFamilyRadios();
   if (fam === S.family) return;
   S.family = fam;
@@ -633,6 +735,12 @@ function applyDeviceInfo(info, chips, quiet = false) {
       $("devDetail").textContent = `${size} bytes   ·   options ${info.opt}   ·   chip CRC ${info.chipcrc}   ·   fw ${info.fw}`;
       if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
         log(`Programmer holds ${name} (${size} bytes, options ${info.opt}, chip CRC ${info.chipcrc})`);
+    } else if (S.family === "renesas") {
+      const cf = +info.cf || 0, df = +info.df || 0;
+      const what = `Code flash ${fmtInt(cf)} B` + (df ? ` + data flash ${fmtInt(df)} B` : "");
+      $("devDetail").textContent = `${what}   ·   CRC ${info.crc}   ·   fw ${info.fw}`;
+      if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
+        log(`Programmer holds ${name} (${what}, CRC ${info.crc})`);
     } else {
       $("devDetail").textContent = `${size} bytes @ ${info.base}   ·   CRC ${info.crc}   ·   for ${info.target}   ·   fw ${info.fw}`;
       if (!quiet || prevCrc !== info.crc || prevImg !== info.img)
@@ -640,12 +748,15 @@ function applyDeviceInfo(info, chips, quiet = false) {
     }
   } else {
     $("devName").textContent = "No firmware stored";
-    $("devDetail").textContent = `No ${FAMILIES[S.family].name} firmware yet. Load a .hex file below and upload it to the programmer.`;
+    $("devDetail").textContent = `No ${FAMILIES[S.family].name} firmware yet. Load ${FAMILIES[S.family].fileShort} below and upload it to the programmer.`;
   }
   if ("mode" in info) {
     const st = S.family === "fortior"
       ? { mode: info.mode || "button", verify: info.verify || "1", run: info.run || "1",
           speed: info.speed || "100", settle: info.settle || "500" }
+      : S.family === "renesas"
+      ? { mode: info.mode || "button", erase: info.erase || "chip", verify: info.verify || "1", run: info.run || "1",
+          reset: info.reset || "1", swdelay: info.swdelay || "4", settle: info.settle || "500" }
       : { mode: info.mode || "button", erase: info.erase || "chip", verify: info.verify || "1",
           run: info.run || "1", protect: info.protect || "0", swdelay: info.swdelay || "0", settle: info.settle || "500" };
     const dirty = Object.keys(changedSettings()).length > 0;
@@ -744,8 +855,8 @@ $("file").addEventListener("change", async (e) => {
 function parseFile() {
   const { name, bytes } = S.file, fam = S.family;
   try {
-    const { base, data } = loadImage(name, bytes, fam);
-    S.image = { name, base, data, crc: crc32(data) };
+    const im = loadImage(name, bytes, fam);
+    S.image = { name, ...im, crc: crc32(im.data) };
   } catch (err) {
     S.file = S.image = null;
     $("fileName").textContent = "No file selected";
@@ -761,6 +872,9 @@ function parseFile() {
     const a = (n) => "0x" + n.toString(16).toUpperCase().padStart(4, "0");
     $("fileDetail").textContent = `${fmtInt(im.data.length)} bytes   ·   0x0000 – ${a(end)}   ·   CRC ${hex8(im.crc)}`;
     log(`Selected ${im.name} (${fmtInt(im.data.length)} bytes, 0x0000-${a(end)}) for ${FAMILIES[fam].name}`);
+  } else if (fam === "renesas") {
+    $("fileDetail").textContent = `${describeRenesasImage(im)}   ·   CRC ${hex8(im.crc)}`;
+    log(`Selected ${im.name}: ${describeRenesasImage(im)}`);
   } else {
     $("fileDetail").textContent = `${fmtInt(im.data.length)} bytes   ·   ${hex8(im.base)} – ${hex8(end)}   ·   CRC ${hex8(im.crc)}`;
     log(`Selected ${im.name} (${fmtInt(im.data.length)} bytes @ ${hex8(im.base)})`);
@@ -799,6 +913,8 @@ $("uploadBtn").onclick = () => {
       });
       return;
     }
+  } else if (S.family === "renesas") {
+    fields = `${S.image.cf.length} ${S.image.df.length}`;  // code-flash bytes, data-flash bytes
   } else {
     const target = $("target").value || "ANY";
     const chip = S.chips.find((c) => c.name === target);
@@ -830,6 +946,9 @@ function currentSettings() {
   const num = (id, d) => { const v = parseInt($(id).value, 10); return Number.isFinite(v) ? String(v) : d; };
   const common = { mode: radio("mode"), verify: $("verify").checked ? "1" : "0", run: $("run").checked ? "1" : "0" };
   if (S.family === "fortior") return { ...common, speed: num("speed", "100"), settle: num("settle", "500") };
+  if (S.family === "renesas")
+    return { ...common, erase: radio("erase"), reset: $("reset").checked ? "1" : "0",
+             swdelay: num("swdelay", "4"), settle: num("settle", "500") };
   return { ...common, erase: radio("erase"), protect: $("protect").checked ? "1" : "0",
            swdelay: num("swdelay", "0"), settle: num("settle", "500") };
 }
@@ -839,6 +958,7 @@ function showSettings(st) {
   $("verify").checked = st.verify === "1";
   $("run").checked = st.run === "1";
   if ("protect" in st) $("protect").checked = st.protect === "1";
+  if ("reset" in st) $("reset").checked = st.reset === "1";
   if ("swdelay" in st) $("swdelay").value = st.swdelay;
   if ("speed" in st) $("speed").value = st.speed;
   $("settle").value = st.settle;
@@ -890,6 +1010,13 @@ $("detectBtn").onclick = () => runBg("Detect", async () => {
     setBanner("Chip detected", msg, "ok");
     return;
   }
+  if (S.family === "renesas") {
+    const known = info.part !== "UNKNOWN";
+    const msg = `${info.part}  ·  ${info.flash} KB code flash  ·  UID ${info.uid}  ·  SWD delay ${info.swdelay}` + (info.reset === "1" ? "  ·  via RES" : "");
+    log(`Detected ${msg}  ·  DPIDR ${info.dpidr}  ·  access window ${info.aws}/${info.awe}`, "ok");
+    setBanner(known ? "Chip detected" : "Chip answers, part number unknown", msg, known ? "ok" : "err");
+    return;
+  }
   S.lastDetect = info;
   const msg = `${info.chip}  ·  DEV_ID ${info.devid}  ·  ${info.flash} KB flash  ·  read-protected: ${info.protected === "1" ? "yes" : "no"}  ·  SWD delay ${info.swdelay}`;
   log(`Detected ${msg}`, "ok");
@@ -899,11 +1026,11 @@ $("detectBtn").onclick = () => runBg("Detect", async () => {
 });
 $("resetBtn").onclick = () => runBg("Reset", async () => {
   await request("RESET", 15000);
-  log(S.family === "fortior" ? "Target reset and released — the firmware runs" : "Target reset", "ok");
+  log(S.family === "mm32" ? "Target reset" : "Target reset and released — the firmware runs", "ok");
 });
 $("eraseBtn").onclick = async () => {
   if (!(await confirmBox("Erase chip", FAMILIES[S.family].erase, { okText: "Erase", danger: true }))) return;
-  runBg("Erase", async () => { await request("ERASE", 20000); log("Target erased", "ok"); });
+  runBg("Erase", async () => { await request("ERASE", FAMILIES[S.family].eraseMs); log("Target erased", "ok"); });
 };
 $("unlockBtn").onclick = async () => {
   if (!(await confirmBox("Remove read protection", "This ERASES the whole target flash.\nPower-cycle the target afterwards.",

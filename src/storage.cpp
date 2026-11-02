@@ -15,8 +15,8 @@ static constexpr const char *STATS_PATH = "/stats.txt";
 static constexpr const char *CHIPS_PATH = "/chips.txt";
 
 // Per-family image files: /<family>.bin + /<family>.meta
-static const char *const IMG_PATHS[FAMILY_COUNT] = {"/mm32.bin", "/fortior.bin"};
-static const char *const META_PATHS[FAMILY_COUNT] = {"/mm32.meta", "/fortior.meta"};
+static const char *const IMG_PATHS[FAMILY_COUNT] = {"/mm32.bin", "/fortior.bin", "/renesas.bin"};
+static const char *const META_PATHS[FAMILY_COUNT] = {"/mm32.meta", "/fortior.meta", "/renesas.meta"};
 
 const char *imgPath() { return IMG_PATHS[cfg.family]; }
 
@@ -71,9 +71,12 @@ void loadMeta() {
     else if (k == "base") meta.base = parseNum(v);
     else if (k == "target") strlcpy(meta.target, v.c_str(), sizeof(meta.target));
     else if (k == "opt") parseOpt(v.c_str(), meta.opt);
+    else if (k == "cf") meta.cfSize = parseNum(v);
+    else if (k == "df") meta.dfSize = parseNum(v);
   });
   File f = LittleFS.open(imgPath(), "r");
   meta.valid = f && meta.size > 0 && f.size() == meta.size;
+  if (cfg.family == FAMILY_RENESAS && meta.cfSize + meta.dfSize != meta.size) meta.valid = false;
 }
 
 bool setConfig(const char *key, const char *value) {
@@ -92,10 +95,12 @@ bool setConfig(const char *key, const char *value) {
   else if (k == "verify") cfg.verify = n != 0;
   else if (k == "run") cfg.run = n != 0;
   else if (k == "settle") cfg.settleMs = n;
-  else if (k == "erase") cfg.erase = (strcmp(value, "pages") == 0 || n == 1) ? ERASE_PAGES : ERASE_CHIP;
+  else if (k == "erase")
+    cfg.erase = (strcmp(value, "pages") == 0 || strcmp(value, "blocks") == 0 || n == 1) ? ERASE_PAGES : ERASE_CHIP;
   else if (k == "protect") cfg.protect = n != 0;
   else if (k == "swdelay") cfg.swdDelay = n;
   else if (k == "speed") cfg.speed = constrain(n, 50, 1000);
+  else if (k == "reset") cfg.reset = n != 0;
   else return false;
   return true;
 }
@@ -110,10 +115,11 @@ String configString() {
   s += " run=" + String(cfg.run);
   s += " settle=" + String(cfg.settleMs);
   s += " erase=";
-  s += cfg.erase == ERASE_PAGES ? "pages" : "chip";
+  s += cfg.erase == ERASE_CHIP ? "chip" : cfg.family == FAMILY_RENESAS ? "blocks" : "pages";
   s += " protect=" + String(cfg.protect);
   s += " swdelay=" + String(cfg.swdDelay);
   s += " speed=" + String(cfg.speed);
+  s += " reset=" + String(cfg.reset);
   return s;
 }
 
@@ -175,8 +181,8 @@ bool begin() {
 
 void saveMeta() {
   File f = LittleFS.open(META_PATHS[cfg.family], "w");
-  f.printf("size=%u\ncrc=0x%08X\nname=%s\nbase=0x%08X\ntarget=%s\nopt=%s\n", meta.size, meta.crc, meta.name,
-           meta.base, meta.target, optString(meta.opt).c_str());
+  f.printf("size=%u\ncrc=0x%08X\nname=%s\nbase=0x%08X\ntarget=%s\nopt=%s\ncf=%u\ndf=%u\n", meta.size, meta.crc,
+           meta.name, meta.base, meta.target, optString(meta.opt).c_str(), meta.cfSize, meta.dfSize);
 }
 
 void saveConfig() {

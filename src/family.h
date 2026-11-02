@@ -15,7 +15,7 @@ struct Result {
   const char *err = nullptr;  // nullptr = PASS
   bool counted = true;        // false: no target answered, so it is not counted as a failed device
   char chip[24] = "";         // chip name and ID for the RESULT / CHIP events
-  char id[16] = "";
+  char id[36] = "";           // up to the 128-bit Renesas unique ID as hex
 };
 
 struct Family {
@@ -34,9 +34,10 @@ struct Family {
 
 extern const Family mm32Family;
 extern const Family fortiorFamily;
+extern const Family renesasFamily;
 
 inline const Family &active() {
-  static const Family *const all[storage::FAMILY_COUNT] = {&mm32Family, &fortiorFamily};
+  static const Family *const all[storage::FAMILY_COUNT] = {&mm32Family, &fortiorFamily, &renesasFamily};
   return *all[storage::cfg.family];
 }
 

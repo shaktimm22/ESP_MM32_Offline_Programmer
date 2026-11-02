@@ -21,6 +21,7 @@ static constexpr uint8_t AP_TAR = 0x04;
 static constexpr uint8_t AP_DRW = 0x0C;
 
 static constexpr uint32_t CSW_BASE = 0x23000000;  // MasterType=debug, HPROT privileged
+static constexpr uint32_t CSW_SIZE8 = 0x00;
 static constexpr uint32_t CSW_SIZE16 = 0x01;
 static constexpr uint32_t CSW_SIZE32 = 0x02;
 static constexpr uint32_t CSW_INC = 0x10;
@@ -217,6 +218,11 @@ bool connect(uint32_t *dpidr, bool powerUp) {
   return false;
 }
 
+void powerDown() {
+  writeDP(DP_CTRLSTAT, 0);
+  invalidateCache();
+}
+
 bool readDP(uint8_t addr, uint32_t *v) { return xferRetry(REQ_RD | (addr & 0x0C), v); }
 
 bool writeDP(uint8_t addr, uint32_t v) { return xferRetry(addr & 0x0C, &v); }
@@ -258,15 +264,35 @@ bool read32(uint32_t addr, uint32_t *v) {
   return setCSW(CSW_BASE | CSW_SIZE32) && setTAR(addr) && readAP(AP_DRW, v);
 }
 
+// Narrow reads: the MEM-AP returns the data on the byte lanes selected by addr[1:0].
+bool read16(uint32_t addr, uint16_t *v) {
+  uint32_t w;
+  if (!(setCSW(CSW_BASE | CSW_SIZE16) && setTAR(addr) && readAP(AP_DRW, &w))) return false;
+  *v = (uint16_t)(w >> ((addr & 2) * 8));
+  return true;
+}
+
+bool read8(uint32_t addr, uint8_t *v) {
+  uint32_t w;
+  if (!(setCSW(CSW_BASE | CSW_SIZE8) && setTAR(addr) && readAP(AP_DRW, &w))) return false;
+  *v = (uint8_t)(w >> ((addr & 3) * 8));
+  return true;
+}
+
 bool write32(uint32_t addr, uint32_t v) {
   return setCSW(CSW_BASE | CSW_SIZE32) && setTAR(addr) && writeAP(AP_DRW, v);
 }
 
+// Narrow writes: the value is replicated on every byte lane. ADIv5 expects it on the lanes
+// selected by the address, but the MM32 flash controller always takes HWDATA[15:0];
+// replicating satisfies both.
 bool write16(uint32_t addr, uint16_t v) {
-  // ADIv5 puts a halfword on the lanes selected by addr[1], but the MM32 flash
-  // controller always takes HWDATA[15:0]. Replicating it on both lanes works for both.
   return setCSW(CSW_BASE | CSW_SIZE16) && setTAR(addr) &&
          writeAP(AP_DRW, (uint32_t)v | ((uint32_t)v << 16));
+}
+
+bool write8(uint32_t addr, uint8_t v) {
+  return setCSW(CSW_BASE | CSW_SIZE8) && setTAR(addr) && writeAP(AP_DRW, (uint32_t)v * 0x01010101u);
 }
 
 bool supportsHalfword() {

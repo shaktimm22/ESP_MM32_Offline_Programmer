@@ -1,5 +1,5 @@
-// Offline programmer for ESP8266: MM32 over SWD and Fortior FU68xx over FICE, one firmware.
-// The active chip family is a setting ("SET family mm32|fortior"); each family keeps its own
+// Offline programmer for ESP8266: MM32 and Renesas RA2E1 over SWD, Fortior FU68xx over FICE, one
+// firmware. The active chip family is a setting ("SET family mm32|fortior|renesas"); each family keeps its own
 // stored image. The family back ends live in family_*.cpp.
 // The PC UI talks to this over UART with a line protocol (see README.md):
 // every reply starts with "@OK" / "@ERR", asynchronous events with "@EVT".
@@ -241,7 +241,7 @@ static void handleLine(char *line) {
     reply(c, family::infoString());
   } else if (cmd == "BEGIN") {
     // BEGIN <size> <crc32> <family fields...> <name...>
-    //   mm32: <base> <target>     fortior: <option bytes, 8 hex>
+    //   mm32: <base> <target>     fortior: <option bytes, 8 hex>     renesas: <cf bytes> <df bytes>
     char *save;
     char *tSize = strtok_r(args, " ", &save);
     char *tCrc = strtok_r(nullptr, " ", &save);
@@ -381,6 +381,9 @@ void setup() {
 #endif
   ledBusy(false);
   ledResult(-1);
+#if PIN_NRST >= 0
+  pinMode(PIN_NRST, INPUT);  // Renesas RES released; the target pulls it up
+#endif
 
   Serial.setRxBufferSize(1024);
   Serial.begin(SERIAL_BAUD);
